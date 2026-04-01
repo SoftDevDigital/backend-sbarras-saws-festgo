@@ -1,4 +1,14 @@
-import { IsString, IsNumber, IsOptional, IsBoolean, Min, Max, MaxLength, Matches } from 'class-validator';
+import { ApiPropertyOptional } from '@nestjs/swagger';
+import {
+  IsString,
+  IsNumber,
+  IsOptional,
+  IsBoolean,
+  Min,
+  Max,
+  MaxLength,
+  Matches,
+} from 'class-validator';
 import { Transform } from 'class-transformer';
 
 export class CreateProductDto {
@@ -19,18 +29,22 @@ export class CreateProductDto {
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0, { message: 'Cost must be positive' })
-  @Transform(({ value }) => value ? parseFloat(value) : undefined)
+  @Transform(({ value }) => (value ? parseFloat(value) : undefined))
   cost?: number;
 
   @IsOptional()
   @IsString()
   @MaxLength(10, { message: 'Quick key must be less than 10 characters' })
-  @Matches(/^[A-Z0-9]*$/, { message: 'Quick key can only contain uppercase letters and numbers' })
+  @Matches(/^[A-Z0-9]*$/, {
+    message: 'Quick key can only contain uppercase letters and numbers',
+  })
   quickKey?: string;
 
   @IsString()
   @MaxLength(3, { message: 'Code must be 2-3 characters maximum' })
-  @Matches(/^[A-Z]{2,3}$/, { message: 'Code must be 2-3 uppercase letters only' })
+  @Matches(/^[A-Z]{2,3}$/, {
+    message: 'Code must be 2-3 uppercase letters only',
+  })
   code: string;
 
   @IsOptional()
@@ -48,13 +62,13 @@ export class CreateProductDto {
   @IsOptional()
   @IsNumber()
   @Min(0, { message: 'Stock cannot be negative' })
-  @Transform(({ value }) => value ? parseInt(value) : 0)
+  @Transform(({ value }) => (value ? parseInt(value) : 0))
   stock?: number;
 
   @IsOptional()
   @IsNumber()
   @Min(0, { message: 'Minimum stock cannot be negative' })
-  @Transform(({ value }) => value ? parseInt(value) : 0)
+  @Transform(({ value }) => (value ? parseInt(value) : 0))
   minStock?: number;
 
   @IsOptional()
@@ -66,7 +80,7 @@ export class CreateProductDto {
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0, { message: 'Tax rate cannot be negative' })
   @Max(100, { message: 'Tax rate cannot exceed 100%' })
-  @Transform(({ value }) => value ? parseFloat(value) : 0)
+  @Transform(({ value }) => (value ? parseFloat(value) : 0))
   taxRate?: number;
 
   @IsOptional()
@@ -104,25 +118,29 @@ export class UpdateProductDto {
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0, { message: 'Price must be positive' })
-  @Transform(({ value }) => value ? parseFloat(value) : undefined)
+  @Transform(({ value }) => (value ? parseFloat(value) : undefined))
   price?: number;
 
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0, { message: 'Cost must be positive' })
-  @Transform(({ value }) => value ? parseFloat(value) : undefined)
+  @Transform(({ value }) => (value ? parseFloat(value) : undefined))
   cost?: number;
 
   @IsOptional()
   @IsString()
   @MaxLength(10, { message: 'Quick key must be less than 10 characters' })
-  @Matches(/^[A-Z0-9]*$/, { message: 'Quick key can only contain uppercase letters and numbers' })
+  @Matches(/^[A-Z0-9]*$/, {
+    message: 'Quick key can only contain uppercase letters and numbers',
+  })
   quickKey?: string;
 
   @IsOptional()
   @IsString()
   @MaxLength(3, { message: 'Code must be 2-3 characters maximum' })
-  @Matches(/^[A-Z]{2,3}$/, { message: 'Code must be 2-3 uppercase letters only' })
+  @Matches(/^[A-Z]{2,3}$/, {
+    message: 'Code must be 2-3 uppercase letters only',
+  })
   code?: string;
 
   @IsOptional()
@@ -156,7 +174,7 @@ export class UpdateProductDto {
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0, { message: 'Tax rate cannot be negative' })
   @Max(100, { message: 'Tax rate cannot exceed 100%' })
-  @Transform(({ value }) => value ? parseFloat(value) : undefined)
+  @Transform(({ value }) => (value ? parseFloat(value) : undefined))
   taxRate?: number;
 
   @IsOptional()
@@ -181,10 +199,15 @@ export class UpdateProductDto {
 }
 
 export class ProductQueryDto {
+  @ApiPropertyOptional({ description: 'Reservado / filtros por evento si aplica.' })
   @IsOptional()
   @IsString()
   event_id?: string;
 
+  @ApiPropertyOptional({
+    description:
+      'UUID de barra: si tiene lista de precios, limita productos y precios a esa lista.',
+  })
   @IsOptional()
   @IsString()
   bar_id?: string;
@@ -199,10 +222,16 @@ export class ProductQueryDto {
   })
   active?: boolean;
 
+  @ApiPropertyOptional()
   @IsOptional()
   @IsString()
   search?: string;
 
+  @ApiPropertyOptional({
+    enum: ['true', 'false'],
+    description:
+      'Si `true`, devuelve solo teclas rápidas (`quickKey`) con precio; combina con `bar_id` para precios de lista.',
+  })
   @IsOptional()
   @IsString()
   keys_only?: string;
@@ -213,7 +242,13 @@ export class ProductQueryDto {
 
   @IsOptional()
   @IsString()
-  sort_by?: 'name' | 'price' | 'created_at' | 'updated_at' | 'stock' | 'category';
+  sort_by?:
+    | 'name'
+    | 'price'
+    | 'created_at'
+    | 'updated_at'
+    | 'stock'
+    | 'category';
 
   @IsOptional()
   @IsString()

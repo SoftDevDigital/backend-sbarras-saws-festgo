@@ -9,7 +9,7 @@ export class ExpenseModel extends BaseModel implements IExpense {
 
   constructor(data?: IExpenseCreate) {
     super();
-    
+
     if (data) {
       this.eventId = data.eventId;
       this.type = data.type;
@@ -41,7 +41,7 @@ export class ExpenseModel extends BaseModel implements IExpense {
 
   static fromDynamoDBItem(item: Record<string, any>): ExpenseModel {
     const expense = new ExpenseModel();
-    
+
     expense.id = item.id;
     expense.eventId = item.eventId;
     expense.type = item.type;
@@ -49,7 +49,7 @@ export class ExpenseModel extends BaseModel implements IExpense {
     expense.description = item.description;
     expense.createdAt = item.createdAt;
     expense.updatedAt = item.updatedAt;
-    
+
     return expense;
   }
 
@@ -60,7 +60,10 @@ export class ExpenseModel extends BaseModel implements IExpense {
       errors.push('Event ID is required');
     }
 
-    if (!this.type || !['supplies', 'staff', 'equipment', 'other'].includes(this.type)) {
+    if (
+      !this.type ||
+      !['supplies', 'staff', 'equipment', 'other'].includes(this.type)
+    ) {
       errors.push('Type must be one of: supplies, staff, equipment, other');
     }
 

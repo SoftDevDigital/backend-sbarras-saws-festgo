@@ -1,616 +1,347 @@
-import { Injectable, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
-import { DynamoDBService } from '../../shared/services/dynamodb.service';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  ConflictException,
+} from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Product, ProductDocument } from '../../shared/schemas/product.schema';
+import { Ticket, TicketDocument } from '../../shared/schemas/ticket.schema';
 import { CustomLoggerService } from '../../shared/services/logger.service';
-import { ProductModel } from '../../shared/models/product.model';
-import { IProduct, IProductCreate, IProductUpdate, IProductKey, IProductStockUpdate, IProductStockAlert } from '../../shared/interfaces/product.interface';
-import { CreateProductDto, UpdateProductDto, ProductQueryDto, StockUpdateDto } from '../dto/product.dto';
-import { TABLE_NAMES } from '../../shared/config/dynamodb.config';
+import {
+  IProduct,
+  IProductKey,
+  IProductStockAlert,
+} from '../../shared/interfaces/product.interface';
+import {
+  CreateProductDto,
+  UpdateProductDto,
+  ProductQueryDto,
+  StockUpdateDto,
+} from '../dto/product.dto';
+import { BarService } from '../../bars/services/bar.service';
+import { PriceListService } from '../../price-lists/services/price-list.service';
 
 @Injectable()
 export class ProductService {
   private readonly logger = new CustomLoggerService();
 
-  constructor(private readonly dynamoDBService: DynamoDBService) {}
+  constructor(
+    @InjectModel(Product.name)
+    private readonly productModel: Model<ProductDocument>,
+    @InjectModel(Ticket.name)
+    private readonly ticketModel: Model<TicketDocument>,
+    private readonly barService: BarService,
+    private readonly priceListService: PriceListService,
+  ) {}
 
   async create(createProductDto: CreateProductDto): Promise<IProduct> {
     try {
-      // Validar entrada básica
-      if (!createProductDto || !createProductDto.name || !createProductDto.price) {
+      if (
+        !createProductDto ||
+        !createProductDto.name ||
+        !createProductDto.price
+      ) {
         throw new BadRequestException('Product name and price are required');
       }
 
-      // Validar que la tecla rápida sea única si se proporciona
       if (createProductDto.quickKey) {
         await this.validateQuickKeyUniqueness(createProductDto.quickKey);
       }
 
-      const product = new ProductModel(createProductDto);
-      const validationErrors = product.validate();
-      
-      if (validationErrors.length > 0) {
-        throw new BadRequestException(`Product validation failed: ${validationErrors.join(', ')}`);
-      }
+      const newProduct = new this.productModel({
+        ...createProductDto,
+        active: createProductDto.active ?? true,
+      });
 
-      if (!product.isValidQuickKey()) {
-        throw new BadRequestException('Quick key must contain only uppercase letters and numbers (max 10 characters)');
-      }
+      const savedProduct = await newProduct.save();
 
-      // Intentar crear el producto en la base de datos
-      const productData = product.toDynamoDB();
-      await this.dynamoDBService.put(TABLE_NAMES.PRODUCTS, productData);
-      
-      this.logger.success(`Product created: ${product.name} (ID: ${product.id})`, 'ProductService');
-      return product;
-
+      this.logger.success(
+        `Product created: ${savedProduct.name} (ID: ${savedProduct._id})`,
+        'ProductService',
+      );
+      return this.mapProduct(savedProduct);
     } catch (error) {
-      // Solo loggear errores inesperados, no errores de validación
-      if (!(error instanceof BadRequestException) && !(error instanceof ConflictException)) {
-        this.logger.error('Unexpected error creating product:', undefined, 'ProductService');
-      }
-      
-      // Re-lanzar errores de validación sin modificar
-      if (error instanceof BadRequestException || error instanceof ConflictException) {
+      if (
+        error instanceof BadRequestException ||
+        error instanceof ConflictException
+      ) {
         throw error;
       }
-      
-      // Manejar errores de base de datos
-      if (error.name === 'ValidationException') {
-        throw new BadRequestException('Invalid product data format');
-      } else if (error.name === 'ResourceNotFoundException') {
-        throw new BadRequestException('Products table not found. Please contact system administrator');
-      } else if (error.name === 'ConditionalCheckFailedException') {
-        throw new ConflictException('Product with this quick key already exists');
-      }
-      
-      // Error genérico
-      throw new BadRequestException(`Failed to create product '${createProductDto.name}'. Please try again or contact support if the problem persists.`);
+      this.logger.error(
+        'Error creating product:',
+        error.message,
+        'ProductService',
+      );
+      throw new BadRequestException(
+        `Failed to create product '${createProductDto.name}'.`,
+      );
     }
   }
 
   async findAll(query: ProductQueryDto): Promise<IProduct[]> {
     try {
-      // Validar parámetros de paginación
-      if (query.limit && (query.limit < 1 || query.limit > 1000)) {
-        throw new BadRequestException('Limit must be between 1 and 1000');
-      }
-      if (query.offset && query.offset < 0) {
-        throw new BadRequestException('Offset cannot be negative');
-      }
+      const filter: any = {};
 
-      // Validar parámetros de ordenamiento
-      if (query.sort_by && !['name', 'price', 'created_at', 'updated_at', 'stock', 'category'].includes(query.sort_by)) {
-        throw new BadRequestException('Invalid sort field. Valid options: name, price, created_at, updated_at, stock, category');
-      }
-      if (query.sort_order && !['asc', 'desc'].includes(query.sort_order)) {
-        throw new BadRequestException('Invalid sort order. Valid options: asc, desc');
-      }
-
-      // Obtener productos de la base de datos
-      const result = await this.dynamoDBService.scan(TABLE_NAMES.PRODUCTS);
-      
-      if (!result || !Array.isArray(result)) {
-        console.warn('Unexpected result format from DynamoDB scan');
-        return [];
-      }
-
-      let products: IProduct[] = result.map(item => {
-        try {
-          return ProductModel.fromDynamoDB(item);
-        } catch (error) {
-          console.error('Error converting DynamoDB item to product:', error);
-          return null;
+      if (query.bar_id) {
+        const bar = await this.barService.findOne(query.bar_id);
+        if (bar.priceListId) {
+          const ids = await this.priceListService.getProductIdsInList(
+            bar.priceListId,
+          );
+          if (ids.length === 0) {
+            return [];
+          }
+          filter._id = { $in: ids };
         }
-      }).filter(product => product !== null);
-      
-      // Aplicar filtros
-      if (query.status) {
-        switch (query.status) {
-          case 'active':
-            products = products.filter(product => product.active === true);
-            break;
-          case 'inactive':
-            products = products.filter(product => product.active === false);
-            break;
-          case 'all':
-            // No filtrar por estado
-            break;
-          default:
-            throw new BadRequestException('Invalid status filter. Valid options: active, inactive, all');
-        }
-      } else if (query.active !== undefined) {
-        // Compatibilidad con el parámetro active
-        products = products.filter(product => product.active === query.active);
       }
 
-      // Filtros adicionales
-      if (query.category && query.category.trim()) {
-        products = products.filter(product => 
-          product.category && product.category.toLowerCase().includes(query.category!.toLowerCase())
-        );
-      }
+      if (query.status === 'active') filter.active = true;
+      if (query.status === 'inactive') filter.active = false;
+      if (query.category)
+        filter.category = { $regex: query.category, $options: 'i' };
+      if (query.low_stock) filter.$expr = { $lte: ['$stock', '$minStock'] };
+      if (query.out_of_stock) filter.stock = { $lte: 0 };
 
-      if (query.low_stock) {
-        products = products.filter(product => product.stock <= product.minStock);
-      }
-
-      if (query.out_of_stock) {
-        products = products.filter(product => product.stock <= 0);
-      }
-
-      // Aplicar ordenamiento
+      const sort: any = {};
       if (query.sort_by) {
-        products = this.sortProducts(products, query.sort_by, query.sort_order || 'asc');
+        sort[query.sort_by] = query.sort_order === 'desc' ? -1 : 1;
+      } else {
+        sort.createdAt = -1;
       }
 
-      // Aplicar paginación
-      if (query.limit || query.offset) {
-        const start = query.offset || 0;
-        const end = query.limit ? start + query.limit : undefined;
-        products = products.slice(start, end);
-      }
-      
-      this.logger.info(`Retrieved ${products.length} products with applied filters`, 'ProductService');
-      return products;
+      const products = await this.productModel
+        .find(filter)
+        .sort(sort)
+        .skip(query.offset || 0)
+        .limit(query.limit || 1000);
 
+      return products.map((p) => this.mapProduct(p));
     } catch (error) {
-      // Solo loggear errores inesperados
-      if (!(error instanceof BadRequestException)) {
-        this.logger.error('Unexpected error fetching products:', undefined, 'ProductService');
-      }
-      
-      if (error instanceof BadRequestException) {
-        throw error;
-      }
-      
-      // Manejar errores de base de datos
-      if (error.name === 'ResourceNotFoundException') {
-        throw new BadRequestException('Products table not found. Please contact system administrator');
-      } else if (error.name === 'ValidationException') {
-        throw new BadRequestException('Invalid query parameters');
-      }
-      
-      throw new BadRequestException('Failed to retrieve products. Please try again or contact support if the problem persists.');
-    }
-  }
-
-  private async findAllProducts(): Promise<IProduct[]> {
-    try {
-      const result = await this.dynamoDBService.scan(TABLE_NAMES.PRODUCTS);
-      return result.map(item => ProductModel.fromDynamoDB(item));
-    } catch (error) {
-      throw new BadRequestException(`Failed to fetch all products: ${error.message}`);
+      this.logger.error(
+        'Error fetching products:',
+        error.message,
+        'ProductService',
+      );
+      throw new BadRequestException('Failed to retrieve products.');
     }
   }
 
   async findOne(id: string): Promise<IProduct> {
-    try {
-      // Validar ID
-      if (!id || typeof id !== 'string' || id.trim().length === 0) {
-        throw new BadRequestException('Product ID is required and must be a valid string');
-      }
+    const product = await this.productModel.findById(id);
 
-      const cleanId = id.trim();
-      if (cleanId.length < 10) {
-        throw new BadRequestException('Invalid product ID format');
-      }
-
-      const result = await this.dynamoDBService.get(TABLE_NAMES.PRODUCTS, {
-        PK: `PRODUCT#${cleanId}`,
-        SK: `PRODUCT#${cleanId}`,
-      });
-
-      if (!result) {
-        throw new NotFoundException(`Product with ID '${cleanId}' not found. Please verify the ID and try again.`);
-      }
-
-      try {
-        const product = ProductModel.fromDynamoDB(result);
-        // Log informativo solo en desarrollo
-        if (process.env.NODE_ENV === 'development') {
-          console.log(`🔍 Product retrieved: ${product.name} (ID: ${product.id})`);
-        }
-        return product;
-      } catch (conversionError) {
-        console.error('❌ Error converting DynamoDB result to product:', conversionError);
-        throw new BadRequestException('Product data is corrupted. Please contact system administrator.');
-      }
-
-    } catch (error) {
-      // Solo loggear errores inesperados
-      if (!(error instanceof NotFoundException) && !(error instanceof BadRequestException)) {
-        console.error(`❌ Unexpected error fetching product '${id}':`, error);
-      }
-      
-      if (error instanceof NotFoundException || error instanceof BadRequestException) {
-        throw error;
-      }
-      
-      // Manejar errores de base de datos
-      if (error.name === 'ResourceNotFoundException') {
-        throw new BadRequestException('Products table not found. Please contact system administrator');
-      } else if (error.name === 'ValidationException') {
-        throw new BadRequestException('Invalid product ID format');
-      }
-      
-      throw new BadRequestException(`Failed to retrieve product with ID '${id}'. Please try again or contact support if the problem persists.`);
+    if (!product) {
+      throw new NotFoundException(`Product with ID '${id}' not found.`);
     }
+
+    return this.mapProduct(product);
   }
 
-  async update(id: string, updateProductDto: UpdateProductDto): Promise<IProduct> {
+  async update(
+    id: string,
+    updateProductDto: UpdateProductDto,
+  ): Promise<IProduct> {
     try {
-      // Validar entrada
-      if (!updateProductDto || Object.keys(updateProductDto).length === 0) {
-        throw new BadRequestException('At least one field must be provided for update');
-      }
-
-      // Validar que no se intente cambiar el ID
-      if (updateProductDto.name !== undefined && updateProductDto.name.trim().length === 0) {
-        throw new BadRequestException('Product name cannot be empty');
-      }
-
-      if (updateProductDto.price !== undefined && updateProductDto.price < 0) {
-        throw new BadRequestException('Product price cannot be negative');
-      }
-
-      // Obtener producto existente
       const existingProduct = await this.findOne(id);
 
-      // Validar que la nueva tecla rápida sea única si se está cambiando
-      if (updateProductDto.quickKey && updateProductDto.quickKey !== existingProduct.quickKey) {
+      if (
+        updateProductDto.quickKey &&
+        updateProductDto.quickKey !== existingProduct.quickKey
+      ) {
         await this.validateQuickKeyUniqueness(updateProductDto.quickKey, id);
       }
 
-      // Crear producto actualizado
-      const product = new ProductModel({
-        ...existingProduct,
-        ...updateProductDto,
-        quickKey: existingProduct.quickKey || undefined,
-      });
-      product.update(updateProductDto);
+      const updatedProduct = await this.productModel.findByIdAndUpdate(
+        id,
+        { ...updateProductDto },
+        { new: true },
+      );
 
-      // Validar el producto actualizado
-      const validationErrors = product.validate();
-      if (validationErrors.length > 0) {
-        throw new BadRequestException(`Update validation failed: ${validationErrors.join(', ')}`);
+      if (!updatedProduct) {
+        throw new NotFoundException(`Product with ID '${id}' not found.`);
       }
 
-      if (!product.isValidQuickKey()) {
-        throw new BadRequestException('Quick key must contain only uppercase letters and numbers (max 10 characters)');
-      }
-
-      // Actualizar en la base de datos
-      const productData = product.toDynamoDB();
-      await this.dynamoDBService.put(TABLE_NAMES.PRODUCTS, productData);
-      
-      // Log informativo solo en desarrollo
-      if (process.env.NODE_ENV === 'development') {
-        console.log(`✏️ Product updated: ${product.name} (ID: ${product.id})`);
-      }
-      return product;
-
+      return this.mapProduct(updatedProduct);
     } catch (error) {
-      // Solo loggear errores inesperados
-      if (!(error instanceof NotFoundException) && !(error instanceof BadRequestException) && !(error instanceof ConflictException)) {
-        console.error(`❌ Unexpected error updating product '${id}':`, error);
-      }
-      
-      if (error instanceof NotFoundException || error instanceof BadRequestException || error instanceof ConflictException) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof BadRequestException ||
+        error instanceof ConflictException
+      ) {
         throw error;
       }
-      
-      // Manejar errores de base de datos
-      if (error.name === 'ResourceNotFoundException') {
-        throw new BadRequestException('Products table not found. Please contact system administrator');
-      } else if (error.name === 'ValidationException') {
-        throw new BadRequestException('Invalid update data format');
-      } else if (error.name === 'ConditionalCheckFailedException') {
-        throw new ConflictException('Product data conflict. Please refresh and try again.');
-      }
-      
-      throw new BadRequestException(`Failed to update product with ID '${id}'. Please try again or contact support if the problem persists.`);
+      throw new BadRequestException(
+        `Failed to update product with ID '${id}'.`,
+      );
     }
   }
 
-  async remove(id: string): Promise<{ message: string; deletedProduct: IProduct }> {
-    try {
-      // Validar ID
-      if (!id || typeof id !== 'string' || id.trim().length === 0) {
-        throw new BadRequestException('Product ID is required and must be a valid string');
-      }
+  async remove(
+    id: string,
+  ): Promise<{ message: string; deletedProduct: IProduct }> {
+    const product = await this.findOne(id);
 
-      const cleanId = id.trim();
-      
-      // Obtener producto existente
-      const product = await this.findOne(cleanId);
-
-      // Verificar si el producto tiene tickets asociados
-      const hasTickets = await this.checkProductHasTickets(cleanId);
-      if (hasTickets) {
-        throw new ConflictException(`Cannot delete product '${product.name}' because it has associated sales. Please deactivate it instead.`);
-      }
-
-      // Intentar eliminar el producto
-      await this.dynamoDBService.delete(TABLE_NAMES.PRODUCTS, {
-        PK: `PRODUCT#${cleanId}`,
-        SK: `PRODUCT#${cleanId}`,
-      });
-
-      // Log informativo solo en desarrollo
-      if (process.env.NODE_ENV === 'development') {
-        console.log(`🗑️ Product deleted: ${product.name} (ID: ${cleanId})`);
-      }
-      
-      return {
-        message: `Product '${product.name}' deleted successfully`,
-        deletedProduct: product,
-      };
-
-    } catch (error) {
-      // Solo loggear errores inesperados
-      if (!(error instanceof NotFoundException) && !(error instanceof BadRequestException) && !(error instanceof ConflictException)) {
-        console.error(`❌ Unexpected error deleting product '${id}':`, error);
-      }
-      
-      if (error instanceof NotFoundException || error instanceof BadRequestException || error instanceof ConflictException) {
-        throw error;
-      }
-      
-      // Manejar errores de base de datos
-      if (error.name === 'ResourceNotFoundException') {
-        throw new BadRequestException('Products table not found. Please contact system administrator');
-      } else if (error.name === 'ValidationException') {
-        throw new BadRequestException('Invalid product ID format');
-      }
-      
-      throw new BadRequestException(`Failed to delete product with ID '${id}'. Please try again or contact support if the problem persists.`);
+    const hasTickets = await this.ticketModel.exists({ 'items.productId': id });
+    if (hasTickets) {
+      throw new ConflictException(
+        `Cannot delete product '${product.name}' because it has associated sales.`,
+      );
     }
+
+    await this.productModel.findByIdAndDelete(id);
+
+    return {
+      message: `Product '${product.name}' deleted successfully`,
+      deletedProduct: product,
+    };
   }
 
   async getProductKeys(query: { bar_id?: string }): Promise<IProductKey[]> {
-    try {
-      // Por ahora usar scan hasta que tengamos los índices GSI configurados
-      const result = await this.dynamoDBService.scan(TABLE_NAMES.PRODUCTS);
+    let products: ProductDocument[];
 
-      return result
-        .map(item => ProductModel.fromDynamoDB(item))
-        .filter(product => product.active && product.quickKey)
-        .map(product => ({
-          productId: product.id,
+    if (query.bar_id) {
+      const bar = await this.barService.findOne(query.bar_id);
+      if (bar.priceListId) {
+        const list = await this.priceListService.findOne(bar.priceListId);
+        const priceByProductId = new Map(
+          list.items.map((i) => [i.productId, i.unitPrice]),
+        );
+        const ids = list.items.map((i) => i.productId);
+        products = await this.productModel.find({
+          _id: { $in: ids },
+          active: true,
+          quickKey: { $ne: null },
+        });
+        return products.map((product) => ({
+          productId: product._id,
           productName: product.name,
-          price: product.price,
-          quickKey: product.quickKey!,
+          price: priceByProductId.get(product._id) ?? product.price,
+          quickKey: product.quickKey,
           code: product.code,
           stock: product.stock,
-          available: product.available,
+          available: product.active,
         }));
-    } catch (error) {
-      throw new BadRequestException(`Failed to fetch product keys: ${error.message}`);
+      }
     }
+
+    products = await this.productModel.find({
+      active: true,
+      quickKey: { $ne: null },
+    });
+
+    return products.map((product) => ({
+      productId: product._id,
+      productName: product.name,
+      price: product.price,
+      quickKey: product.quickKey,
+      code: product.code,
+      stock: product.stock,
+      available: product.active,
+    }));
   }
 
-  private async validateQuickKeyUniqueness(quickKey: string, excludeId?: string): Promise<void> {
-    try {
-      // Por ahora usar scan hasta que tengamos los índices GSI configurados
-      const result = await this.dynamoDBService.scan(TABLE_NAMES.PRODUCTS);
+  async updateStock(
+    productId: string,
+    stockUpdateDto: StockUpdateDto,
+  ): Promise<IProduct> {
+    const product = await this.productModel.findById(productId);
+    if (!product) throw new NotFoundException('Product not found');
 
-      const conflictingProducts = result
-        .map(item => ProductModel.fromDynamoDB(item))
-        .filter(product => product.quickKey === quickKey && (!excludeId || product.id !== excludeId));
-
-      if (conflictingProducts.length > 0) {
-        throw new ConflictException(`Quick key '${quickKey}' is already in use by product '${conflictingProducts[0].name}'`);
-      }
-    } catch (error) {
-      if (error instanceof ConflictException) {
-        throw error;
-      }
-      throw new BadRequestException(`Failed to validate quick key: ${error.message}`);
+    let newStock = product.stock;
+    if (stockUpdateDto.type === 'add') newStock += stockUpdateDto.quantity;
+    if (stockUpdateDto.type === 'subtract') {
+      if (newStock < stockUpdateDto.quantity)
+        throw new BadRequestException('Insufficient stock');
+      newStock -= stockUpdateDto.quantity;
     }
+    if (stockUpdateDto.type === 'set') newStock = stockUpdateDto.quantity;
+
+    product.stock = newStock;
+    const saved = await product.save();
+    return this.mapProduct(saved);
   }
 
-  private async checkProductHasTickets(productId: string): Promise<boolean> {
-    try {
-      // Por ahora usar scan hasta que tengamos los índices GSI configurados
-      const result = await this.dynamoDBService.scan(TABLE_NAMES.TICKETS);
-      
-      // Buscar tickets que referencien este producto
-      const hasTickets = result.some(item => 
-        item.GSI1PK === `PRODUCT#${productId}` || 
-        item.productId === productId
-      );
+  async getProductStats(): Promise<any> {
+    const products = await this.productModel.find();
 
-      return hasTickets;
-    } catch (error) {
-      // Si hay error consultando tickets, asumir que no hay tickets para ser seguro
-      console.warn(`Could not check tickets for product ${productId}:`, error.message);
-      return false;
-    }
-  }
-
-  async searchProducts(searchTerm: string): Promise<IProduct[]> {
-    try {
-      const allProducts = await this.findAllProducts();
-      
-      const searchLower = searchTerm.toLowerCase();
-      return allProducts.filter(product => 
-        (product.name && product.name.toLowerCase().includes(searchLower)) ||
-        (product.quickKey && product.quickKey.toLowerCase().includes(searchLower))
-      );
-    } catch (error) {
-      throw new BadRequestException(`Failed to search products: ${error.message}`);
-    }
-  }
-
-  async getProductStats(): Promise<{ 
-    total: number; 
-    active: number; 
-    inactive: number; 
-    withKeys: number;
-    lowStock: number;
-    outOfStock: number;
-    totalStockValue: number;
-  }> {
-    try {
-      const allProducts = await this.findAllProducts();
-      
-      const stats = {
-        total: allProducts.length,
-        active: allProducts.filter(p => p.active).length,
-        inactive: allProducts.filter(p => !p.active).length,
-        withKeys: allProducts.filter(p => p.quickKey && p.quickKey.trim().length > 0).length,
-        lowStock: allProducts.filter(p => p.stock <= p.minStock).length,
-        outOfStock: allProducts.filter(p => p.stock <= 0).length,
-        totalStockValue: allProducts.reduce((total, p) => total + (p.stock * (p.cost || p.price)), 0),
-      };
-
-      return stats;
-    } catch (error) {
-      throw new BadRequestException(`Failed to get product stats: ${error.message}`);
-    }
-  }
-
-  async updateStock(productId: string, stockUpdateDto: StockUpdateDto): Promise<IProduct> {
-    try {
-      // Validar entrada
-      if (!stockUpdateDto || !stockUpdateDto.type || stockUpdateDto.quantity === undefined) {
-        throw new BadRequestException('Stock update type and quantity are required');
-      }
-
-      if (stockUpdateDto.quantity < 0) {
-        throw new BadRequestException('Stock quantity cannot be negative');
-      }
-
-      if (!['add', 'subtract', 'set'].includes(stockUpdateDto.type)) {
-        throw new BadRequestException('Invalid stock update type. Valid options: add, subtract, set');
-      }
-
-      // Obtener producto existente
-      const product = await this.findOne(productId);
-      
-      // Crear modelo del producto
-      const productModel = new ProductModel({
-        ...product,
-        quickKey: product.quickKey || undefined,
-      });
-
-      // Validar operaciones de stock
-      switch (stockUpdateDto.type) {
-        case 'add':
-          productModel.addStock(stockUpdateDto.quantity);
-          break;
-        case 'subtract':
-          if (productModel.stock < stockUpdateDto.quantity) {
-            throw new BadRequestException(`Insufficient stock. Current stock: ${productModel.stock}, requested: ${stockUpdateDto.quantity}`);
-          }
-          productModel.subtractStock(stockUpdateDto.quantity);
-          break;
-        case 'set':
-          productModel.setStock(stockUpdateDto.quantity);
-          break;
-      }
-
-      // Actualizar en la base de datos
-      const productData = productModel.toDynamoDB();
-      await this.dynamoDBService.put(TABLE_NAMES.PRODUCTS, productData);
-      
-      // Log informativo solo en desarrollo
-      if (process.env.NODE_ENV === 'development') {
-        console.log(`📊 Stock updated: ${product.name} ${stockUpdateDto.type} ${stockUpdateDto.quantity} (new: ${productModel.stock})`);
-      }
-      return productModel;
-
-    } catch (error) {
-      // Solo loggear errores inesperados
-      if (!(error instanceof NotFoundException) && !(error instanceof BadRequestException)) {
-        console.error(`❌ Unexpected error updating stock for product '${productId}':`, error);
-      }
-      
-      if (error instanceof NotFoundException || error instanceof BadRequestException) {
-        throw error;
-      }
-      
-      // Manejar errores de base de datos
-      if (error.name === 'ResourceNotFoundException') {
-        throw new BadRequestException('Products table not found. Please contact system administrator');
-      } else if (error.name === 'ValidationException') {
-        throw new BadRequestException('Invalid stock update data format');
-      }
-      
-      throw new BadRequestException(`Failed to update stock for product with ID '${productId}'. Please try again or contact support if the problem persists.`);
-    }
+    return {
+      total: products.length,
+      active: products.filter((p) => p.active).length,
+      inactive: products.filter((p) => !p.active).length,
+      withKeys: products.filter((p) => p.quickKey).length,
+      lowStock: products.filter((p) => p.stock <= p.minStock).length,
+      outOfStock: products.filter((p) => p.stock <= 0).length,
+      totalStockValue: products.reduce(
+        (total, p) => total + p.stock * (p.cost || p.price),
+        0,
+      ),
+    };
   }
 
   async getStockAlerts(): Promise<IProductStockAlert[]> {
-    try {
-      const allProducts = await this.findAllProducts();
-      
-      const alerts: IProductStockAlert[] = [];
-      
-      allProducts.forEach(product => {
-        if (product.stock <= 0) {
-          alerts.push({
-            productId: product.id,
-            productName: product.name,
-            currentStock: product.stock,
-            minStock: product.minStock,
-            alertType: 'out_of_stock'
-          });
-        } else if (product.stock <= product.minStock) {
-          alerts.push({
-            productId: product.id,
-            productName: product.name,
-            currentStock: product.stock,
-            minStock: product.minStock,
-            alertType: 'low_stock'
-          });
-        }
-      });
+    const products = await this.productModel.find({
+      $or: [
+        { stock: { $lte: 0 } },
+        { $expr: { $lte: ['$stock', '$minStock'] } },
+      ],
+    });
 
-      return alerts;
-    } catch (error) {
-      throw new BadRequestException(`Failed to get stock alerts: ${error.message}`);
+    return products.map((p) => ({
+      productId: p._id,
+      productName: p.name,
+      currentStock: p.stock,
+      minStock: p.minStock,
+      alertType: p.stock <= 0 ? 'out_of_stock' : 'low_stock',
+    }));
+  }
+
+  async searchProducts(query: string): Promise<IProduct[]> {
+    if (!query) return this.findAll({});
+    const products = await this.productModel.find({
+      $or: [
+        { name: { $regex: query, $options: 'i' } },
+        { category: { $regex: query, $options: 'i' } },
+        { code: { $regex: query, $options: 'i' } },
+      ],
+    });
+    return products.map((p) => this.mapProduct(p));
+  }
+
+  private async validateQuickKeyUniqueness(
+    quickKey: string,
+    excludeId?: string,
+  ): Promise<void> {
+    const query: any = { quickKey };
+    if (excludeId) query._id = { $ne: excludeId };
+
+    const exists = await this.productModel.exists(query);
+    if (exists) {
+      throw new ConflictException(`Quick key '${quickKey}' is already in use.`);
     }
   }
 
-  private sortProducts(products: IProduct[], sortBy: string, order: 'asc' | 'desc'): IProduct[] {
-    return products.sort((a, b) => {
-      let aValue: any;
-      let bValue: any;
-
-      switch (sortBy) {
-        case 'name':
-          aValue = a.name || '';
-          bValue = b.name || '';
-          break;
-        case 'price':
-          aValue = a.price || 0;
-          bValue = b.price || 0;
-          break;
-        case 'created_at':
-          aValue = new Date(a.createdAt);
-          bValue = new Date(b.createdAt);
-          break;
-        case 'updated_at':
-          aValue = new Date(a.updatedAt);
-          bValue = new Date(b.updatedAt);
-          break;
-        case 'stock':
-          aValue = a.stock || 0;
-          bValue = b.stock || 0;
-          break;
-        case 'category':
-          aValue = a.category || '';
-          bValue = b.category || '';
-          break;
-        default:
-          return 0;
-      }
-
-      if (order === 'desc') {
-        return aValue < bValue ? 1 : aValue > bValue ? -1 : 0;
-      } else {
-        return aValue > bValue ? 1 : aValue < bValue ? -1 : 0;
-      }
-    });
+  private mapProduct(product: ProductDocument): IProduct {
+    return {
+      id: product._id,
+      name: product.name,
+      description: product.description,
+      category: product.category,
+      price: product.price,
+      cost: product.cost,
+      stock: product.stock,
+      minStock: product.minStock,
+      unit: product.unit,
+      code: product.code,
+      quickKey: product.quickKey,
+      barcode: product.barcode,
+      taxRate: product.taxRate,
+      active: product.active,
+      available: product.available,
+      createdAt:
+        product['createdAt']?.toISOString() || new Date().toISOString(),
+      updatedAt:
+        product['updatedAt']?.toISOString() || new Date().toISOString(),
+    };
   }
 }

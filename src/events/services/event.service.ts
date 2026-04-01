@@ -1,149 +1,112 @@
-import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
-import { DynamoDBService } from '../../shared/services/dynamodb.service';
-import { EventModel } from '../../shared/models/event.model';
-import { CreateEventDto, UpdateEventDto, EventQueryDto } from '../dto/event.dto';
-import { IEvent, IEventCreate } from '../../shared/interfaces/event.interface';
-import { TABLE_NAMES } from '../../shared/config/dynamodb.config';
+import {
+  Injectable,
+  NotFoundException,
+  ConflictException,
+  BadRequestException,
+} from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Event, EventDocument } from '../../shared/schemas/event.schema';
+import {
+  CreateEventDto,
+  UpdateEventDto,
+  EventQueryDto,
+} from '../dto/event.dto';
+import { IEvent } from '../../shared/interfaces/event.interface';
 
 @Injectable()
 export class EventService {
-  constructor(private readonly dynamoDBService: DynamoDBService) {}
+  constructor(
+    @InjectModel(Event.name) private readonly eventModel: Model<EventDocument>,
+  ) {}
 
   async create(createEventDto: CreateEventDto): Promise<IEvent> {
     // Validar entrada
-    if (!createEventDto.name || !createEventDto.startDate || !createEventDto.endDate) {
-      throw new BadRequestException('Name, start date, and end date are required');
+    if (
+      !createEventDto.name ||
+      !createEventDto.startDate ||
+      !createEventDto.endDate
+    ) {
+      throw new BadRequestException(
+        'Name, start date, and end date are required',
+      );
     }
 
     // Validar fechas
     const startDate = new Date(createEventDto.startDate);
     const endDate = new Date(createEventDto.endDate);
 
-    // Verificar que las fechas sean válidas
     if (isNaN(startDate.getTime())) {
-      throw new BadRequestException('Invalid start date format. Please use ISO 8601 format (YYYY-MM-DDTHH:mm:ss.sssZ)');
+      throw new BadRequestException('Invalid start date format');
     }
 
     if (isNaN(endDate.getTime())) {
-      throw new BadRequestException('Invalid end date format. Please use ISO 8601 format (YYYY-MM-DDTHH:mm:ss.sssZ)');
+      throw new BadRequestException('Invalid end date format');
     }
 
     if (startDate >= endDate) {
       throw new BadRequestException('End date must be after start date');
     }
 
-    // Verificar que la fecha de inicio no sea en el pasado (opcional)
-    const now = new Date();
-    if (startDate < now) {
-      throw new BadRequestException('Start date cannot be in the past');
-    }
-
     // Verificar si ya existe un evento con el mismo nombre
-    const existingEvent = await this.findByName(createEventDto.name);
+    const existingEvent = await this.eventModel.findOne({
+      name: createEventDto.name,
+    });
     if (existingEvent) {
-      throw new ConflictException(`Event '${createEventDto.name}' already exists. Please choose a different name.`);
+      throw new ConflictException(
+        `Event '${createEventDto.name}' already exists.`,
+      );
     }
 
     // Crear nuevo evento
-    const eventModel = new EventModel(createEventDto);
-    
-    try {
-      await this.dynamoDBService.put(TABLE_NAMES.EVENTS, eventModel.toDynamoDBItem());
-    } catch (error) {
-      // Si es error de conexión, simular éxito para mantener la app funcionando
-      if (error.name === 'NetworkingError' || error.name === 'TimeoutError') {
-        console.warn('DynamoDB connection issue during event creation, operation simulated as successful');
-        // Retornar el evento como si se hubiera creado
-      } else {
-        throw error;
-      }
-    }
+    const newEvent = new this.eventModel({
+      ...createEventDto,
+      status: 'active',
+    });
 
-    return {
-      id: eventModel.id,
-      name: eventModel.name,
-      startDate: eventModel.startDate,
-      endDate: eventModel.endDate,
-      status: eventModel.status,
-      createdAt: eventModel.createdAt,
-      updatedAt: eventModel.updatedAt,
-    };
+    const savedEvent = await newEvent.save();
+
+    return this.mapEvent(savedEvent);
   }
 
   async findAll(query: EventQueryDto = {}): Promise<IEvent[]> {
-    let items: any[] = [];
-
     try {
+      const filter: any = {};
+
       if (query.status) {
-        // Intentar buscar por status usando GSI2
-        try {
-          items = await this.dynamoDBService.query(
-            TABLE_NAMES.EVENTS,
-            'GSI2PK = :gsi2pk',
-            {
-              ':gsi2pk': `EVENT#${query.status}`,
-            },
-            undefined,
-            'GSI2'
-          );
-        } catch (error) {
-          // Fallback: usar scan si GSI2 no está disponible
-          console.warn('GSI2 not available, using scan fallback for status query');
-          items = await this.dynamoDBService.scan(
-            TABLE_NAMES.EVENTS,
-            'begins_with(PK, :pk)',
-            {
-              ':pk': 'EVENT#',
-            }
-          );
-          // Filtrar por status en memoria
-          items = items.filter(item => item.status === query.status);
-        }
-      } else {
-        // Buscar todos los eventos
-        items = await this.dynamoDBService.scan(
-          TABLE_NAMES.EVENTS,
-          'begins_with(PK, :pk)',
-          {
-            ':pk': 'EVENT#',
-          }
-        );
+        filter.status = query.status;
       }
+
+      if (query.search) {
+        filter.name = { $regex: query.search, $options: 'i' };
+      }
+
+      const events = await this.eventModel.find(filter).sort({ startDate: -1 });
+      return events.map((event) => this.mapEvent(event));
     } catch (error) {
       console.error('Error in findAll:', error.message);
       return [];
     }
-
-    // Aplicar filtro de búsqueda si se proporciona
-    if (query.search) {
-      items = items.filter(item => 
-        item.name?.toLowerCase().includes(query.search!.toLowerCase())
-      );
-    }
-
-    return items.map(item => EventModel.fromDynamoDBItem(item));
   }
 
   async findOne(id: string): Promise<IEvent> {
-    const item = await this.dynamoDBService.get(TABLE_NAMES.EVENTS, {
-      PK: `EVENT#${id}`,
-      SK: `EVENT#${id}`,
-    });
+    const event = await this.eventModel.findById(id);
 
-    if (!item) {
-      throw new NotFoundException(`Event with ID '${id}' not found. Please verify the event ID and try again.`);
+    if (!event) {
+      throw new NotFoundException(`Event with ID '${id}' not found.`);
     }
 
-    return EventModel.fromDynamoDBItem(item);
+    return this.mapEvent(event);
   }
 
   async update(id: string, updateEventDto: UpdateEventDto): Promise<IEvent> {
-    // Verificar que el evento existe
     const existingEvent = await this.findOne(id);
 
     // Validar fechas si se están actualizando
     if (updateEventDto.startDate || updateEventDto.endDate) {
-      const startDate = new Date(updateEventDto.startDate || existingEvent.startDate);
+      const startDate = new Date(
+        updateEventDto.startDate || existingEvent.startDate,
+      );
       const endDate = new Date(updateEventDto.endDate || existingEvent.endDate);
 
       if (startDate >= endDate) {
@@ -153,69 +116,45 @@ export class EventService {
 
     // Si se está actualizando el nombre, verificar que no exista otro evento con el mismo nombre
     if (updateEventDto.name && updateEventDto.name !== existingEvent.name) {
-      const duplicateEvent = await this.findByName(updateEventDto.name);
-      if (duplicateEvent && duplicateEvent.id !== id) {
-        throw new ConflictException(`Cannot update event '${existingEvent.name}' to '${updateEventDto.name}'. An event with this name already exists. Please choose a different name.`);
+      const duplicateEvent = await this.eventModel.findOne({
+        name: updateEventDto.name,
+      });
+      if (duplicateEvent && duplicateEvent._id !== id) {
+        throw new ConflictException(
+          `Event with name '${updateEventDto.name}' already exists.`,
+        );
       }
     }
 
-    // Actualizar el evento
-    const updatedEvent = {
-      ...existingEvent,
-      ...updateEventDto,
-      updatedAt: new Date().toISOString(),
-    };
+    const updatedEvent = await this.eventModel.findByIdAndUpdate(
+      id,
+      { ...updateEventDto },
+      { new: true },
+    );
 
-    const eventModel = new EventModel();
-    Object.assign(eventModel, updatedEvent);
+    if (!updatedEvent) {
+      throw new NotFoundException(`Event with ID '${id}' not found.`);
+    }
 
-    await this.dynamoDBService.put(TABLE_NAMES.EVENTS, eventModel.toDynamoDBItem());
-
-    return updatedEvent;
+    return this.mapEvent(updatedEvent);
   }
 
   async remove(id: string): Promise<{ message: string; deletedEvent: IEvent }> {
-    // Verificar que el evento existe
-    const existingEvent = await this.findOne(id);
+    const event = await this.findOne(id);
 
-    // Eliminar el evento
-    await this.dynamoDBService.delete(TABLE_NAMES.EVENTS, {
-      PK: `EVENT#${id}`,
-      SK: `EVENT#${id}`,
-    });
+    await this.eventModel.findByIdAndDelete(id);
 
     return {
-      message: `Event '${existingEvent.name}' has been successfully deleted`,
-      deletedEvent: existingEvent
+      message: `Event '${event.name}' has been successfully deleted`,
+      deletedEvent: event,
     };
   }
 
   async findByStatus(status: 'active' | 'closed'): Promise<IEvent[]> {
-    try {
-      const items = await this.dynamoDBService.query(
-        TABLE_NAMES.EVENTS,
-        'GSI2PK = :gsi2pk',
-        {
-          ':gsi2pk': `EVENT#${status}`,
-        },
-        undefined,
-        'GSI2'
-      );
-      return items.map(item => EventModel.fromDynamoDBItem(item));
-    } catch (error) {
-      // Fallback: usar scan si GSI2 no está disponible
-      console.warn('GSI2 not available, using scan fallback for findByStatus');
-      const items = await this.dynamoDBService.scan(
-        TABLE_NAMES.EVENTS,
-        'begins_with(PK, :pk)',
-        {
-          ':pk': 'EVENT#',
-        }
-      );
-      // Filtrar por status en memoria
-      const filteredItems = items.filter(item => item.status === status);
-      return filteredItems.map(item => EventModel.fromDynamoDBItem(item));
-    }
+    const events = await this.eventModel
+      .find({ status })
+      .sort({ startDate: -1 });
+    return events.map((event) => this.mapEvent(event));
   }
 
   async changeStatus(id: string, status: 'active' | 'closed'): Promise<IEvent> {
@@ -230,20 +169,15 @@ export class EventService {
     return this.findByStatus('closed');
   }
 
-  private async findByName(name: string): Promise<IEvent | null> {
-    try {
-      const items = await this.dynamoDBService.scan(
-        TABLE_NAMES.EVENTS,
-        'begins_with(PK, :pk)',
-        {
-          ':pk': 'EVENT#',
-        }
-      );
-
-      const filteredItems = items.filter(item => item.name === name);
-      return filteredItems.length > 0 ? EventModel.fromDynamoDBItem(filteredItems[0]) : null;
-    } catch (error) {
-      return null;
-    }
+  private mapEvent(event: EventDocument): IEvent {
+    return {
+      id: event._id,
+      name: event.name,
+      startDate: event.startDate,
+      endDate: event.endDate,
+      status: event.status,
+      createdAt: event['createdAt'],
+      updatedAt: event['updatedAt'],
+    };
   }
 }

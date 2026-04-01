@@ -12,7 +12,7 @@ export class UserModel extends BaseModel implements IUser {
 
   constructor(data?: IUserCreate) {
     super();
-    
+
     if (data) {
       this.email = data.email;
       this.password = data.password;
@@ -48,7 +48,7 @@ export class UserModel extends BaseModel implements IUser {
 
   static fromDynamoDBItem(item: Record<string, any>): UserModel {
     const user = new UserModel();
-    
+
     user.id = item.id;
     user.email = item.email;
     user.password = item.password;
@@ -59,7 +59,7 @@ export class UserModel extends BaseModel implements IUser {
     user.employeeRole = item.employeeRole;
     user.createdAt = item.createdAt;
     user.updatedAt = item.updatedAt;
-    
+
     return user;
   }
 }

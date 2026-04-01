@@ -13,6 +13,8 @@ export interface ICart {
   userId: string; // ID del usuario (antes bartenderId)
   userName: string; // Nombre del usuario (antes bartenderName)
   eventId: string;
+  /** Opcional: barra activa para aplicar lista de precios en vista previa del carrito */
+  barId?: string;
   items: ICartItem[];
   subtotal: number; // Suma de todos los totales de items
   tax: number; // Impuestos calculados

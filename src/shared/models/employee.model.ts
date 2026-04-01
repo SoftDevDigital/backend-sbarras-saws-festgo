@@ -1,5 +1,10 @@
 import { BaseModel } from './base.model';
-import { IEmployee, IEmployeeCreate, IEmployeeAssignment, IEmployeeAssignmentCreate } from '../interfaces/employee.interface';
+import {
+  IEmployee,
+  IEmployeeCreate,
+  IEmployeeAssignment,
+  IEmployeeAssignmentCreate,
+} from '../interfaces/employee.interface';
 
 export class EmployeeModel extends BaseModel implements IEmployee {
   name: string;
@@ -50,7 +55,10 @@ export class EmployeeModel extends BaseModel implements IEmployee {
   }
 }
 
-export class EmployeeAssignmentModel extends BaseModel implements IEmployeeAssignment {
+export class EmployeeAssignmentModel
+  extends BaseModel
+  implements IEmployeeAssignment
+{
   userId: string; // ID del usuario (antes employeeId)
   eventId: string;
   barId: string;

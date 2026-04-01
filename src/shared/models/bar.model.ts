@@ -9,7 +9,7 @@ export class BarModel extends BaseModel implements IBar {
 
   constructor(data?: IBarCreate) {
     super();
-    
+
     if (data) {
       this.name = data.name;
       this.eventId = data.eventId;
@@ -43,7 +43,7 @@ export class BarModel extends BaseModel implements IBar {
 
   static fromDynamoDBItem(item: Record<string, any>): BarModel {
     const bar = new BarModel();
-    
+
     bar.id = item.id;
     bar.name = item.name;
     bar.eventId = item.eventId;
@@ -51,7 +51,7 @@ export class BarModel extends BaseModel implements IBar {
     bar.status = item.status;
     bar.createdAt = item.createdAt;
     bar.updatedAt = item.updatedAt;
-    
+
     return bar;
   }
 }

@@ -56,7 +56,9 @@ export class CustomLoggerService implements LoggerService {
     const emoji = this.getStatusEmoji(status);
     if (this.isDevelopment) {
       if (status >= 400) {
-        console.log(`${emoji} ${method} ${url} - ${status}${message ? ` - ${message}` : ''}`);
+        console.log(
+          `${emoji} ${method} ${url} - ${status}${message ? ` - ${message}` : ''}`,
+        );
       } else {
         console.log(`${emoji} ${method} ${url} - ${status}`);
       }
@@ -71,4 +73,3 @@ export class CustomLoggerService implements LoggerService {
     return '📡';
   }
 }
-

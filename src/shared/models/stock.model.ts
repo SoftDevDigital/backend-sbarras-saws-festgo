@@ -8,7 +8,7 @@ import {
   IGlobalStockUpdate,
   IStockAlert,
   IStockTransfer,
-  IStockTransferCreate
+  IStockTransferCreate,
 } from '../interfaces/stock.interface';
 
 // Modelo para movimientos de stock
@@ -34,17 +34,19 @@ export class StockMovementModel extends BaseModel implements IStockMovement {
   GSI3PK: string; // For event movements
   GSI3SK: string; // For date within event
 
-  constructor(data?: IStockMovementCreate & {
-    productName?: string;
-    barName?: string;
-    eventName?: string;
-    previousQuantity?: number;
-    newQuantity?: number;
-    ticketId?: string;
-    recordedByName?: string;
-  }) {
+  constructor(
+    data?: IStockMovementCreate & {
+      productName?: string;
+      barName?: string;
+      eventName?: string;
+      previousQuantity?: number;
+      newQuantity?: number;
+      ticketId?: string;
+      recordedByName?: string;
+    },
+  ) {
     super();
-    
+
     if (data) {
       this.productId = data.productId;
       this.productName = data.productName || '';
@@ -166,19 +168,21 @@ export class BarStockModel extends BaseModel implements IBarStock {
   GSI3PK: string; // For product queries
   GSI3SK: string; // For bar within product
 
-  constructor(data?: IBarStockCreate & {
-    productName?: string;
-    barName?: string;
-    eventName?: string;
-    currentStock?: number;
-    totalSold?: number;
-    totalReplenished?: number;
-    totalTransferred?: number;
-    lastMovement?: string;
-    status?: 'active' | 'closed' | 'pending';
-  }) {
+  constructor(
+    data?: IBarStockCreate & {
+      productName?: string;
+      barName?: string;
+      eventName?: string;
+      currentStock?: number;
+      totalSold?: number;
+      totalReplenished?: number;
+      totalTransferred?: number;
+      lastMovement?: string;
+      status?: 'active' | 'closed' | 'pending';
+    },
+  ) {
     super();
-    
+
     if (data) {
       this.productId = data.productId;
       this.productName = data.productName || '';
@@ -285,7 +289,9 @@ export class BarStockModel extends BaseModel implements IBarStock {
 
   subtractStock(quantity: number): void {
     if (this.currentStock < quantity) {
-      throw new Error(`Insufficient stock. Available: ${this.currentStock}, requested: ${quantity}`);
+      throw new Error(
+        `Insufficient stock. Available: ${this.currentStock}, requested: ${quantity}`,
+      );
     }
     this.currentStock -= quantity;
     this.totalSold += quantity;
@@ -294,7 +300,9 @@ export class BarStockModel extends BaseModel implements IBarStock {
 
   transferStock(quantity: number): void {
     if (this.currentStock < quantity) {
-      throw new Error(`Insufficient stock for transfer. Available: ${this.currentStock}, requested: ${quantity}`);
+      throw new Error(
+        `Insufficient stock for transfer. Available: ${this.currentStock}, requested: ${quantity}`,
+      );
     }
     this.currentStock -= quantity;
     this.totalTransferred += quantity;
@@ -334,7 +342,7 @@ export class GlobalStockModel extends BaseModel implements IGlobalStock {
     maxStock?: number;
   }) {
     super();
-    
+
     if (data) {
       this.productId = data.productId;
       this.productName = data.productName || '';
@@ -398,7 +406,9 @@ export class GlobalStockModel extends BaseModel implements IGlobalStock {
 
   reserveStock(quantity: number): void {
     if (this.availableStock < quantity) {
-      throw new Error(`Insufficient available stock. Available: ${this.availableStock}, requested: ${quantity}`);
+      throw new Error(
+        `Insufficient available stock. Available: ${this.availableStock}, requested: ${quantity}`,
+      );
     }
     this.reservedStock += quantity;
     this.updateAvailableStock();
@@ -406,7 +416,9 @@ export class GlobalStockModel extends BaseModel implements IGlobalStock {
 
   releaseStock(quantity: number): void {
     if (this.reservedStock < quantity) {
-      throw new Error(`Insufficient reserved stock. Reserved: ${this.reservedStock}, requested: ${quantity}`);
+      throw new Error(
+        `Insufficient reserved stock. Reserved: ${this.reservedStock}, requested: ${quantity}`,
+      );
     }
     this.reservedStock -= quantity;
     this.updateAvailableStock();
@@ -419,7 +431,9 @@ export class GlobalStockModel extends BaseModel implements IGlobalStock {
 
   subtractStock(quantity: number): void {
     if (this.totalStock < quantity) {
-      throw new Error(`Insufficient total stock. Total: ${this.totalStock}, requested: ${quantity}`);
+      throw new Error(
+        `Insufficient total stock. Total: ${this.totalStock}, requested: ${quantity}`,
+      );
     }
     this.totalStock -= quantity;
     this.updateAvailableStock();
@@ -468,7 +482,7 @@ export class StockAlertModel extends BaseModel implements IStockAlert {
     acknowledgedAt?: string;
   }) {
     super();
-    
+
     if (data) {
       this.productId = data.productId;
       this.productName = data.productName || '';
@@ -478,7 +492,9 @@ export class StockAlertModel extends BaseModel implements IStockAlert {
       this.currentStock = data.currentStock;
       this.threshold = data.threshold;
       this.severity = data.severity || 'medium';
-      this.message = data.message || this.generateMessage(data.type, data.currentStock, data.threshold);
+      this.message =
+        data.message ||
+        this.generateMessage(data.type, data.currentStock, data.threshold);
       this.acknowledged = data.acknowledged || false;
       this.acknowledgedBy = data.acknowledgedBy;
       this.acknowledgedAt = data.acknowledgedAt;
@@ -552,7 +568,11 @@ export class StockAlertModel extends BaseModel implements IStockAlert {
     return alert;
   }
 
-  private generateMessage(type: string, current: number, threshold: number): string {
+  private generateMessage(
+    type: string,
+    current: number,
+    threshold: number,
+  ): string {
     switch (type) {
       case 'low_stock':
         return `Stock bajo: ${current} unidades disponibles (mínimo: ${threshold})`;
@@ -596,17 +616,19 @@ export class StockTransferModel extends BaseModel implements IStockTransfer {
   GSI2PK: string; // For event transfers
   GSI2SK: string; // For date within event
 
-  constructor(data?: IStockTransferCreate & {
-    productName?: string;
-    fromBarName?: string;
-    toBarName?: string;
-    eventName?: string;
-    requestedByName?: string;
-    approvedByName?: string;
-    status?: 'pending' | 'approved' | 'rejected' | 'completed';
-  }) {
+  constructor(
+    data?: IStockTransferCreate & {
+      productName?: string;
+      fromBarName?: string;
+      toBarName?: string;
+      eventName?: string;
+      requestedByName?: string;
+      approvedByName?: string;
+      status?: 'pending' | 'approved' | 'rejected' | 'completed';
+    },
+  ) {
     super();
-    
+
     if (data) {
       this.productId = data.productId;
       this.productName = data.productName || '';

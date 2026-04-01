@@ -1,6 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 // @ts-ignore - node-thermal-printer no tiene tipos TypeScript
-import { Printer, PrinterTypes } from 'node-thermal-printer';
+import {
+  printer as ThermalPrinter,
+  types as PrinterTypes,
+} from 'node-thermal-printer';
 import { ITicket } from '../interfaces/ticket.interface';
 
 export interface PrinterConfig {
@@ -22,7 +25,7 @@ export interface PrinterStatus {
 @Injectable()
 export class ThermalPrinterService {
   private readonly logger = new Logger(ThermalPrinterService.name);
-  private printers = new Map<string, Printer>();
+  private printers = new Map<string, any>();
   private readonly printerConfigs: PrinterConfig[] = [
     {
       id: 'printer-1',
@@ -46,8 +49,11 @@ export class ThermalPrinterService {
   }
 
   private async initializePrinters(): Promise<void> {
-    this.logger.log('Initializing thermal printers...', 'ThermalPrinterService.initializePrinters');
-    
+    this.logger.log(
+      'Initializing thermal printers...',
+      'ThermalPrinterService.initializePrinters',
+    );
+
     for (const config of this.printerConfigs) {
       if (config.active) {
         await this.connectPrinter(config);
@@ -57,9 +63,12 @@ export class ThermalPrinterService {
 
   private async connectPrinter(config: PrinterConfig): Promise<boolean> {
     try {
-      this.logger.log(`Connecting to printer ${config.name} (${config.id})`, 'ThermalPrinterService.connectPrinter');
-      
-      const printer = new Printer({
+      this.logger.log(
+        `Connecting to printer ${config.name} (${config.id})`,
+        'ThermalPrinterService.connectPrinter',
+      );
+
+      const printer = new ThermalPrinter({
         type: PrinterTypes.EPSON, // Gadnic IT1050 es compatible con Epson ESC/POS
         interface: config.printerName || 'printer', // Nombre de la impresora
         options: {
@@ -69,10 +78,13 @@ export class ThermalPrinterService {
 
       // Verificar si la impresora está disponible
       await printer.isPrinterConnected();
-      
+
       this.printers.set(config.id, printer);
-      this.logger.log(`Printer ${config.name} connected successfully`, 'ThermalPrinterService.connectPrinter');
-      
+      this.logger.log(
+        `Printer ${config.name} connected successfully`,
+        'ThermalPrinterService.connectPrinter',
+      );
+
       return true;
     } catch (error) {
       this.logger.error(`Failed to connect to printer ${config.name}:`, error);
@@ -80,24 +92,26 @@ export class ThermalPrinterService {
     }
   }
 
-  private getPrinterForBar(barId: string): Printer | null {
+  private getPrinterForBar(barId: string): any {
     // Buscar impresora específica para la barra
-    const config = this.printerConfigs.find(p => p.barId === barId && p.active);
+    const config = this.printerConfigs.find(
+      (p) => p.barId === barId && p.active,
+    );
     if (config) {
       return this.printers.get(config.id) || null;
     }
-    
+
     // Si no hay impresora específica, usar la primera disponible
-    const firstConfig = this.printerConfigs.find(p => p.active);
+    const firstConfig = this.printerConfigs.find((p) => p.active);
     if (firstConfig) {
       return this.printers.get(firstConfig.id) || null;
     }
-    
+
     return null;
   }
 
-  private getDefaultPrinter(): Printer | null {
-    const firstConfig = this.printerConfigs.find(p => p.active);
+  private getDefaultPrinter(): any {
+    const firstConfig = this.printerConfigs.find((p) => p.active);
     if (firstConfig) {
       return this.printers.get(firstConfig.id) || null;
     }
@@ -106,14 +120,19 @@ export class ThermalPrinterService {
 
   async printTicket(ticket: ITicket, barId?: string): Promise<boolean> {
     try {
-      const printer = barId ? this.getPrinterForBar(barId) : this.getDefaultPrinter();
-      
+      const printer = barId
+        ? this.getPrinterForBar(barId)
+        : this.getDefaultPrinter();
+
       if (!printer) {
         this.logger.error('No printer available for ticket printing');
         return false;
       }
 
-      this.logger.log(`Printing ticket ${ticket.id}`, 'ThermalPrinterService.printTicket');
+      this.logger.log(
+        `Printing ticket ${ticket.id}`,
+        'ThermalPrinterService.printTicket',
+      );
 
       // Configurar impresora
       printer.alignCenter();
@@ -125,7 +144,9 @@ export class ThermalPrinterService {
       printer.bold(false);
       printer.println('--- TICKET DE VENTA ---');
       printer.alignLeft();
-      printer.println(`Fecha: ${new Date(ticket.createdAt).toLocaleString('es-ES')}`);
+      printer.println(
+        `Fecha: ${new Date(ticket.createdAt).toLocaleString('es-ES')}`,
+      );
       printer.println(`Ticket ID: ${ticket.id.substring(0, 8)}`);
       printer.println(`Atendido por: ${ticket.userName}`);
       printer.println(`Barra: ${ticket.barName}`);
@@ -178,9 +199,11 @@ export class ThermalPrinterService {
       printer.openCashDrawer(); // Abrir cajón si está conectado
 
       await printer.execute();
-      this.logger.log(`Ticket ${ticket.id} printed successfully`, 'ThermalPrinterService.printTicket');
+      this.logger.log(
+        `Ticket ${ticket.id} printed successfully`,
+        'ThermalPrinterService.printTicket',
+      );
       return true;
-      
     } catch (error) {
       this.logger.error(`Error printing ticket ${ticket.id}:`, error);
       return false;
@@ -189,14 +212,19 @@ export class ThermalPrinterService {
 
   async printTestPage(printerId?: string): Promise<boolean> {
     try {
-      const printer = printerId ? this.printers.get(printerId) : this.getDefaultPrinter();
-      
+      const printer = printerId
+        ? this.printers.get(printerId)
+        : this.getDefaultPrinter();
+
       if (!printer) {
         this.logger.error(`Printer ${printerId || 'default'} not connected`);
         return false;
       }
 
-      this.logger.log(`Printing test page on printer ${printerId || 'default'}`, 'ThermalPrinterService.printTestPage');
+      this.logger.log(
+        `Printing test page on printer ${printerId || 'default'}`,
+        'ThermalPrinterService.printTestPage',
+      );
 
       printer.alignCenter();
       printer.bold(true);
@@ -214,20 +242,25 @@ export class ThermalPrinterService {
       printer.println('0123456789!@#$%^&*()');
       printer.feed(3);
       printer.cut();
-      
+
       await printer.execute();
-      this.logger.log(`Test page printed successfully on printer ${printerId || 'default'}`, 'ThermalPrinterService.printTestPage');
+      this.logger.log(
+        `Test page printed successfully on printer ${printerId || 'default'}`,
+        'ThermalPrinterService.printTestPage',
+      );
       return true;
-      
     } catch (error) {
-      this.logger.error(`Error printing test page on printer ${printerId || 'default'}:`, error);
+      this.logger.error(
+        `Error printing test page on printer ${printerId || 'default'}:`,
+        error,
+      );
       return false;
     }
   }
 
   async getPrintersStatus(): Promise<PrinterStatus[]> {
     const statuses: PrinterStatus[] = [];
-    
+
     for (const config of this.printerConfigs) {
       const printer = this.printers.get(config.id);
       let connected = false;
@@ -249,21 +282,21 @@ export class ThermalPrinterService {
         name: config.name,
         connected,
         barId: config.barId,
-        lastError
+        lastError,
       });
     }
-    
+
     return statuses;
   }
 
   async reconnectPrinter(printerId?: string): Promise<boolean> {
     if (printerId) {
       // Reconectar impresora específica
-      const config = this.printerConfigs.find(p => p.id === printerId);
+      const config = this.printerConfigs.find((p) => p.id === printerId);
       if (config) {
         // Cerrar conexión existente
         this.printers.delete(printerId);
-        
+
         // Reconectar
         return await this.connectPrinter(config);
       }
@@ -272,7 +305,7 @@ export class ThermalPrinterService {
       await this.initializePrinters();
       return true;
     }
-    
+
     return false;
   }
 
@@ -293,39 +326,81 @@ export class ThermalPrinterService {
   }
 
   async getAvailablePrinters(): Promise<PrinterConfig[]> {
-    return this.printerConfigs.filter(config => config.active);
+    return this.printerConfigs.filter((config) => config.active);
   }
 
   async addPrinterConfig(config: Omit<PrinterConfig, 'id'>): Promise<string> {
     const newId = `printer-${Date.now()}`;
     const newConfig: PrinterConfig = {
       id: newId,
-      ...config
+      ...config,
     };
-    
+
     this.printerConfigs.push(newConfig);
-    
+
     if (config.active) {
       await this.connectPrinter(newConfig);
     }
-    
-    this.logger.log(`New printer config added: ${newId}`, 'ThermalPrinterService.addPrinterConfig');
+
+    this.logger.log(
+      `New printer config added: ${newId}`,
+      'ThermalPrinterService.addPrinterConfig',
+    );
     return newId;
   }
 
   async removePrinterConfig(printerId: string): Promise<boolean> {
-    const configIndex = this.printerConfigs.findIndex(p => p.id === printerId);
+    const configIndex = this.printerConfigs.findIndex(
+      (p) => p.id === printerId,
+    );
     if (configIndex === -1) {
       return false;
     }
-    
+
     // Cerrar conexión si existe
     this.printers.delete(printerId);
-    
+
     // Remover configuración
     this.printerConfigs.splice(configIndex, 1);
-    
-    this.logger.log(`Printer config removed: ${printerId}`, 'ThermalPrinterService.removePrinterConfig');
+
+    this.logger.log(
+      `Printer config removed: ${printerId}`,
+      'ThermalPrinterService.removePrinterConfig',
+    );
     return true;
+  }
+  async generatePrintFormat(ticket: ITicket, config: any): Promise<any> {
+    // Retorna un objeto estructurado para que el frontend pueda mostrarlo o imprimirlo
+    return {
+      header: {
+        businessName: config.businessName || 'Bar System',
+        businessAddress: config.businessAddress,
+        businessPhone: config.businessPhone,
+        businessTaxId: config.businessTaxId,
+      },
+      ticketInfo: {
+        id: ticket.id,
+        date: ticket.createdAt,
+        userName: ticket.userName,
+        barName: ticket.barName,
+        eventName: ticket.eventName,
+        paymentMethod: ticket.paymentMethod,
+      },
+      items: ticket.items.map((item) => ({
+        name: item.productName,
+        quantity: item.quantity,
+        price: item.unitPrice,
+        total: item.total,
+      })),
+      totals: {
+        subtotal: ticket.subtotal,
+        tax: ticket.totalTax,
+        total: ticket.total,
+      },
+      footer: {
+        message: config.thankYouMessage || '¡Gracias por su compra!',
+        footer: config.receiptFooter || 'Sistema de Barras',
+      },
+    };
   }
 }

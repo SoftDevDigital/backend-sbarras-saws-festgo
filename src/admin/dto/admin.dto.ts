@@ -1,4 +1,13 @@
-import { IsString, IsOptional, IsEnum, IsDateString, IsNumber, IsArray, IsBoolean, IsEmail } from 'class-validator';
+import {
+  IsString,
+  IsOptional,
+  IsEnum,
+  IsDateString,
+  IsNumber,
+  IsArray,
+  IsBoolean,
+  IsEmail,
+} from 'class-validator';
 
 export class DashboardQueryDto {
   @IsOptional()
@@ -146,7 +155,13 @@ export class ExportDataDto {
   format: 'excel' | 'pdf' | 'csv' | 'json';
 
   @IsEnum(['tickets', 'expenses', 'employees', 'products', 'events', 'audit'])
-  entity: 'tickets' | 'expenses' | 'employees' | 'products' | 'events' | 'audit';
+  entity:
+    | 'tickets'
+    | 'expenses'
+    | 'employees'
+    | 'products'
+    | 'events'
+    | 'audit';
 
   @IsOptional()
   @IsDateString()

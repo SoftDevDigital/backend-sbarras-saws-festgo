@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { MongooseModule } from '@nestjs/mongoose';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { SharedModule } from './shared/shared.module';
@@ -13,11 +14,18 @@ import { StockModule } from './stock/stock.module';
 import { ExpensesModule } from './expenses/expenses.module';
 import { AdminModule } from './admin/admin.module';
 import { CartModule } from './cart/cart.module';
+import { PriceListsModule } from './price-lists/price-lists.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
+    }),
+    MongooseModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        uri: config.get<string>('MONGODB_URI'),
+      }),
     }),
     SharedModule,
     AuthModule,
@@ -30,6 +38,7 @@ import { CartModule } from './cart/cart.module';
     ExpensesModule,
     AdminModule,
     CartModule,
+    PriceListsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

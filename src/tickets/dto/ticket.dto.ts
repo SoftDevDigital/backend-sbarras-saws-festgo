@@ -1,16 +1,16 @@
-import { 
-  IsString, 
-  IsNotEmpty, 
-  IsOptional, 
-  IsEnum, 
-  IsNumber, 
-  Min, 
-  Max, 
-  IsUUID, 
+import {
+  IsString,
+  IsNotEmpty,
+  IsOptional,
+  IsEnum,
+  IsNumber,
+  Min,
+  Max,
+  IsUUID,
   IsBoolean,
   IsDateString,
   ValidateNested,
-  IsArray
+  IsArray,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 

@@ -1,37 +1,42 @@
-import { Injectable, NotFoundException, BadRequestException, ConflictException, Logger } from '@nestjs/common';
-import { DynamoDBService } from '../../shared/services/dynamodb.service';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  Logger,
+} from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Ticket, TicketDocument } from '../../shared/schemas/ticket.schema';
 import { ThermalPrinterService } from '../../shared/services/thermal-printer.service';
-import { TicketModel, TicketItemModel } from '../../shared/models/ticket.model';
-import { 
-  CreateTicketDto, 
-  UpdateTicketDto, 
-  AddTicketItemDto, 
+import {
+  CreateTicketDto,
+  UpdateTicketDto,
+  AddTicketItemDto,
   UpdateTicketItemDto,
   ProcessPaymentDto,
   TicketQueryDto,
-  TicketStatsQueryDto
+  TicketStatsQueryDto,
 } from '../dto/ticket.dto';
-import { 
-  ITicket, 
-  ITicketItem, 
-  ITicketCreate, 
+import {
+  ITicket,
+  ITicketItem,
   ITicketStats,
-  ITicketPrintFormat 
 } from '../../shared/interfaces/ticket.interface';
-import { TABLE_NAMES } from '../../shared/config/dynamodb.config';
 import { ProductService } from '../../products/services/product.service';
 import { AuthService } from '../../auth/services/auth.service';
 import { BarService } from '../../bars/services/bar.service';
 import { EventService } from '../../events/services/event.service';
 import { BusinessConfigService } from '../../shared/services/business-config.service';
 import { StockService } from '../../stock/services/stock.service';
+import { PriceListService } from '../../price-lists/services/price-list.service';
 
 @Injectable()
 export class TicketService {
   private readonly logger = new Logger(TicketService.name);
 
   constructor(
-    private readonly dynamoDBService: DynamoDBService,
+    @InjectModel(Ticket.name)
+    private readonly ticketModel: Model<TicketDocument>,
     private readonly thermalPrinterService: ThermalPrinterService,
     private readonly productService: ProductService,
     private readonly authService: AuthService,
@@ -39,985 +44,459 @@ export class TicketService {
     private readonly eventService: EventService,
     private readonly businessConfigService: BusinessConfigService,
     private readonly stockService: StockService,
+    private readonly priceListService: PriceListService,
   ) {}
 
-  // ===== TICKETS =====
-
-  async create(createTicketDto: CreateTicketDto, userId: string): Promise<ITicket> {
-    const startTime = Date.now();
-    this.logger.log(`Creating ticket for user ${userId}`, 'TicketService.create');
-
+  async create(
+    createTicketDto: CreateTicketDto,
+    userId: string,
+  ): Promise<ITicket> {
     try {
-      // Validar entrada con mensajes específicos
-      if (!userId || typeof userId !== 'string' || userId.trim().length === 0) {
-        this.logger.warn('Invalid user ID provided', 'TicketService.create');
-        throw new BadRequestException('User ID is required and must be a valid string.');
-      }
-
-      if (!createTicketDto?.barId || typeof createTicketDto.barId !== 'string' || createTicketDto.barId.trim().length === 0) {
-        this.logger.warn('Invalid bar ID provided', 'TicketService.create');
-        throw new BadRequestException('Bar ID is required and must be a valid string. Please select a valid bar.');
-      }
-
-      // Verificar que el usuario existe (ya no necesitamos buscar en employees)
-      this.logger.debug(`Validating user ${userId}`, 'TicketService.create');
       const user = await this.authService.findUserById(userId);
-      if (!user) {
-        throw new BadRequestException('User not found. Please ensure you are logged in.');
-      }
-      
-      // Verificar que la barra existe
-      this.logger.debug(`Validating bar ${createTicketDto.barId}`, 'TicketService.create');
-      const bar = await this.barService.findOne(createTicketDto.barId);
-      
-      // Verificar que el evento existe
-      this.logger.debug(`Validating event ${bar.eventId}`, 'TicketService.create');
-      const event = await this.eventService.findOne(bar.eventId);
+      if (!user) throw new BadRequestException('User not found.');
 
-      // Crear nuevo ticket
-      this.logger.debug('Creating ticket model', 'TicketService.create');
-      const ticketModel = new TicketModel({
-        ...createTicketDto,
+      const bar = await this.barService.findOne(createTicketDto.barId);
+      const event = await this.eventService.findOne(bar.eventId);
+      const listSnapshot = await this.priceListService.getSnapshotForBar(
+        bar.id,
+      );
+
+      const items: Array<{
+        productId: string;
+        productName: string;
+        quantity: number;
+        unitPrice: number;
+        taxRate: number;
+        subtotal: number;
+        tax: number;
+        total: number;
+      }> = [];
+
+      if (createTicketDto.items && createTicketDto.items.length > 0) {
+        for (const itemDto of createTicketDto.items) {
+          const product = await this.productService.findOne(itemDto.productId);
+          if (!product.available || !product.active) {
+            throw new BadRequestException(
+              `Product '${product.name}' is not available for sale.`,
+            );
+          }
+          const { unitPrice, taxRate } =
+            await this.priceListService.resolveForBar(bar.id, product);
+          const quantity = itemDto.quantity;
+          const subtotal = unitPrice * quantity;
+          const tax = subtotal * (taxRate / 100);
+          const total = subtotal + tax;
+          items.push({
+            productId: product.id,
+            productName: product.name,
+            quantity,
+            unitPrice,
+            taxRate,
+            subtotal,
+            tax,
+            total,
+          });
+        }
+      }
+
+      const subtotal = items.reduce((sum, i) => sum + i.subtotal, 0);
+      const totalTax = items.reduce((sum, i) => sum + i.tax, 0);
+      const total = items.reduce((sum, i) => sum + i.total, 0);
+
+      const status =
+        createTicketDto.items?.length && createTicketDto.paymentMethod
+          ? 'paid'
+          : 'open';
+
+      const { items: _dtoItems, ...ticketPayload } = createTicketDto;
+
+      const newTicket = new this.ticketModel({
+        ...ticketPayload,
         userId: user.id,
         userName: user.name,
         barId: bar.id,
         barName: bar.name,
         eventId: event.id,
         eventName: event.name,
+        priceListId: listSnapshot.priceListId,
+        priceListName: listSnapshot.priceListName,
+        items,
+        subtotal,
+        totalTax,
+        total,
+        status,
+        paidAmount: status === 'paid' ? total : 0,
+        changeAmount: 0,
+        printed: false,
       });
 
-      // Guardar en base de datos
-      this.logger.debug(`Saving ticket ${ticketModel.id} to database`, 'TicketService.create');
-      await this.dynamoDBService.put(TABLE_NAMES.TICKETS, ticketModel.toDynamoDBItem());
+      const savedTicket = await newTicket.save();
 
-      // Si el ticket tiene items (del cart), guardarlos
-      if (createTicketDto.items && createTicketDto.items.length > 0) {
-        this.logger.debug(`Adding ${createTicketDto.items.length} items to ticket ${ticketModel.id}`, 'TicketService.create');
-        
-        for (const itemDto of createTicketDto.items) {
-          // itemDto viene del cart con: productId, productName, quantity, price
-          const itemData: any = itemDto;
-          
-          const ticketItem = new TicketItemModel({
-            ticketId: ticketModel.id,
-            productId: itemData.productId,
-            productName: itemData.productName,
-            quantity: itemData.quantity,
-            unitPrice: itemData.price,
-            taxRate: 0, // Sin impuestos por ahora
-          });
-          
-          await this.dynamoDBService.put(TABLE_NAMES.TICKET_ITEMS, ticketItem.toDynamoDBItem());
-          ticketModel.items.push(ticketItem);
-        }
-        
-        // Recalcular totales
-        ticketModel.recalculateTotals();
-        
-        // Actualizar totales del ticket si vienen del cart
-        if (createTicketDto.paymentMethod) {
-          ticketModel.paymentMethod = createTicketDto.paymentMethod;
-        }
-        
-        // Si viene del carrito con método de pago = venta facturada: marcar como pagado para que cuente en dashboard/recuentos
-        if (createTicketDto.items?.length && createTicketDto.paymentMethod) {
-          ticketModel.status = 'paid';
-          ticketModel.paidAmount = ticketModel.total;
-          ticketModel.changeAmount = 0;
-        }
-        
-        await this.dynamoDBService.put(TABLE_NAMES.TICKETS, ticketModel.toDynamoDBItem());
-      }
-
-      // Imprimir ticket automáticamente
-      this.logger.debug(`Printing ticket ${ticketModel.id}`, 'TicketService.create');
       try {
-        const printSuccess = await this.thermalPrinterService.printTicket({
-          id: ticketModel.id,
-          userId: ticketModel.userId,
-          userName: ticketModel.userName,
-          barId: ticketModel.barId,
-          barName: ticketModel.barName,
-          eventId: ticketModel.eventId,
-          eventName: ticketModel.eventName,
-          status: ticketModel.status,
-          subtotal: ticketModel.subtotal,
-          totalTax: ticketModel.totalTax,
-          total: ticketModel.total,
-          items: ticketModel.items,
-          notes: ticketModel.notes,
-          printed: ticketModel.printed,
-          createdAt: ticketModel.createdAt,
-          updatedAt: ticketModel.updatedAt,
-          customerName: 'Cliente General',
-          paymentMethod: ticketModel.paymentMethod || 'cash',
-          paidAmount: ticketModel.paidAmount ?? ticketModel.total,
-          changeAmount: ticketModel.changeAmount ?? 0,
-        } as ITicket, ticketModel.barId);
-
+        const printSuccess = await this.thermalPrinterService.printTicket(
+          this.mapTicket(savedTicket),
+          savedTicket.barId,
+        );
         if (printSuccess) {
-          // Marcar como impreso
-          ticketModel.printed = true;
-          await this.dynamoDBService.put(TABLE_NAMES.TICKETS, ticketModel.toDynamoDBItem());
-          this.logger.log(`Ticket ${ticketModel.id} printed successfully`, 'TicketService.create');
-        } else {
-          this.logger.warn(`Failed to print ticket ${ticketModel.id}`, 'TicketService.create');
+          savedTicket.printed = true;
+          await savedTicket.save();
         }
       } catch (printError) {
-        this.logger.error(`Error printing ticket ${ticketModel.id}:`, printError);
-        // No lanzar error, solo registrar
+        this.logger.error(
+          `Error printing ticket ${savedTicket._id}:`,
+          printError,
+        );
       }
 
-      const duration = Date.now() - startTime;
-      this.logger.log(`Ticket ${ticketModel.id} created successfully in ${duration}ms`, 'TicketService.create');
-
-      return {
-        id: ticketModel.id,
-        userId: ticketModel.userId,
-        userName: ticketModel.userName,
-        barId: ticketModel.barId,
-        barName: ticketModel.barName,
-        eventId: ticketModel.eventId,
-        eventName: ticketModel.eventName,
-        status: ticketModel.status,
-        subtotal: ticketModel.subtotal,
-        totalTax: ticketModel.totalTax,
-        total: ticketModel.total,
-        items: ticketModel.items,
-        notes: ticketModel.notes,
-        printed: ticketModel.printed,
-        createdAt: ticketModel.createdAt,
-        updatedAt: ticketModel.updatedAt,
-      };
+      return this.mapTicket(savedTicket);
     } catch (error) {
-      const duration = Date.now() - startTime;
-      
-      // Re-lanzar errores conocidos con contexto
-      if (error instanceof BadRequestException) {
-        this.logger.warn(`Bad request when creating ticket after ${duration}ms: ${error.message}`, 'TicketService.create');
-        throw error;
-      }
-      
-      if (error instanceof NotFoundException) {
-        this.logger.warn(`Resource not found when creating ticket after ${duration}ms: ${error.message}`, 'TicketService.create');
-        throw error;
-      }
-
-      // Log error completo para debugging
-      this.logger.error(`Unexpected error creating ticket after ${duration}ms:`, error.stack, 'TicketService.create');
-      
-      // Retornar error genérico pero informativo
-      throw new BadRequestException('Unable to create ticket at this time. Please verify that all required information is correct and try again. If the problem persists, contact system administrator.');
+      this.logger.error('Error creating ticket:', error.message);
+      throw error instanceof BadRequestException
+        ? error
+        : new BadRequestException('Failed to create ticket.');
     }
   }
 
   async findAll(query: TicketQueryDto = {}): Promise<ITicket[]> {
-    const startTime = Date.now();
-    this.logger.log('Searching tickets with filters', 'TicketService.findAll');
-
     try {
-      let items: Record<string, any>[] = [];
+      const filter: any = {};
 
-      // Construir query según los filtros con logging
-      // Paginación completa para que el admin vea TODOS los tickets (sin pérdida por límite de página)
-      if (query.userId) {
-        this.logger.debug(`Searching tickets for user ${query.userId}`, 'TicketService.findAll');
-        items = await this.dynamoDBService.query(
-          TABLE_NAMES.TICKETS,
-          'GSI1PK = :gsi1pk',
-          { ':gsi1pk': `USER#${query.userId}` },
-          undefined,
-          'GSI1',
-          100
-        );
-      } else if (query.barId) {
-        this.logger.debug(`Searching tickets for bar ${query.barId}`, 'TicketService.findAll');
-        items = await this.dynamoDBService.query(
-          TABLE_NAMES.TICKETS,
-          'GSI2PK = :gsi2pk',
-          { ':gsi2pk': `BAR#${query.barId}` },
-          undefined,
-          'GSI2',
-          100
-        );
-      } else if (query.eventId) {
-        this.logger.debug(`Searching tickets for event ${query.eventId}`, 'TicketService.findAll');
-        items = await this.dynamoDBService.query(
-          TABLE_NAMES.TICKETS,
-          'GSI3PK = :gsi3pk',
-          { ':gsi3pk': `EVENT#${query.eventId}` },
-          undefined,
-          'GSI3',
-          100
-        );
-      } else {
-        this.logger.debug('Searching all tickets', 'TicketService.findAll');
-        items = await this.dynamoDBService.scan(TABLE_NAMES.TICKETS, undefined, undefined, undefined, undefined, 100);
+      if (query.userId) filter.userId = query.userId;
+      if (query.barId) filter.barId = query.barId;
+      if (query.eventId) filter.eventId = query.eventId;
+      if (query.status) filter.status = query.status;
+      if (query.paymentMethod) filter.paymentMethod = query.paymentMethod;
+      if (query.printed !== undefined) filter.printed = query.printed;
+
+      if (query.dateFrom || query.dateTo) {
+        filter.createdAt = {};
+        if (query.dateFrom) filter.createdAt.$gte = new Date(query.dateFrom);
+        if (query.dateTo) filter.createdAt.$lte = new Date(query.dateTo);
       }
 
-      this.logger.debug(`Found ${items.length} tickets before filtering`, 'TicketService.findAll');
+      if (query.search) {
+        const searchRegex = { $regex: query.search, $options: 'i' };
+        filter.$or = [{ userName: searchRegex }, { barName: searchRegex }];
+      }
 
-      // Filtrar resultados en memoria para filtros adicionales
-      let filteredItems = items.filter(item => {
-        try {
-          if (query.status && item.status !== query.status) return false;
-          if (query.paymentMethod && item.paymentMethod !== query.paymentMethod) return false;
-          if (query.printed !== undefined && item.printed !== query.printed) return false;
-          if (query.dateFrom && item.createdAt < query.dateFrom) return false;
-          if (query.dateTo && item.createdAt > query.dateTo) return false;
-          if (query.search) {
-            const searchLower = query.search.toLowerCase();
-            if (!item.userName?.toLowerCase().includes(searchLower) &&
-                !item.barName?.toLowerCase().includes(searchLower)) return false;
-          }
-          return true;
-        } catch (filterError) {
-          this.logger.warn(`Error filtering ticket ${item.id}:`, filterError.message, 'TicketService.findAll');
-          return false; // Excluir items con errores de filtrado
-        }
-      });
-
-      this.logger.debug(`Found ${filteredItems.length} tickets after filtering`, 'TicketService.findAll');
-
-      // Cargar items de cada ticket con manejo de errores
-      const ticketsWithItems = await Promise.allSettled(
-        filteredItems.map(async (item) => {
-          try {
-            const ticket = TicketModel.fromDynamoDBItem(item);
-            ticket.items = await this.getTicketItems(ticket.id);
-            return ticket;
-          } catch (itemError) {
-            this.logger.warn(`Error processing ticket ${item.id}:`, itemError.message, 'TicketService.findAll');
-            return null;
-          }
-        })
-      );
-
-      // Filtrar resultados exitosos
-      const validTickets = ticketsWithItems
-        .filter((result): result is PromiseFulfilledResult<TicketModel> => 
-          result.status === 'fulfilled' && result.value !== null)
-        .map(result => result.value);
-
-      this.logger.debug(`Successfully processed ${validTickets.length} tickets`, 'TicketService.findAll');
-
-      const tickets = validTickets.map(ticket => ({
-        id: ticket.id,
-        userId: ticket.userId,
-        userName: ticket.userName,
-        barId: ticket.barId,
-        barName: ticket.barName,
-        eventId: ticket.eventId,
-        eventName: ticket.eventName,
-        status: ticket.status,
-        paymentMethod: ticket.paymentMethod,
-        subtotal: ticket.subtotal,
-        totalTax: ticket.totalTax,
-        total: ticket.total,
-        paidAmount: ticket.paidAmount,
-        changeAmount: ticket.changeAmount,
-        items: ticket.items,
-        notes: ticket.notes,
-        printed: ticket.printed,
-        createdAt: ticket.createdAt,
-        updatedAt: ticket.updatedAt,
-      }));
-
-      const duration = Date.now() - startTime;
-      this.logger.log(`Successfully retrieved ${tickets.length} tickets in ${duration}ms`, 'TicketService.findAll');
-      
-      return tickets;
+      const tickets = await this.ticketModel
+        .find(filter)
+        .sort({ createdAt: -1 });
+      return tickets.map((t) => this.mapTicket(t));
     } catch (error) {
-      const duration = Date.now() - startTime;
-      this.logger.error(`Error retrieving tickets after ${duration}ms:`, error.stack, 'TicketService.findAll');
-      
-      // Retornar lista vacía en caso de error para no romper la aplicación
-      this.logger.warn('Returning empty ticket list due to error', 'TicketService.findAll');
+      this.logger.error('Error fetching tickets:', error.message);
       return [];
     }
   }
 
   async findOne(id: string): Promise<ITicket> {
-    const startTime = Date.now();
-    this.logger.log(`Finding ticket ${id}`, 'TicketService.findOne');
-
-    try {
-      // Validar ID con mensajes específicos
-      if (!id || typeof id !== 'string' || id.trim().length === 0) {
-        this.logger.warn('Invalid ticket ID provided', 'TicketService.findOne');
-        throw new BadRequestException('Ticket ID is required and must be a valid string. Please provide a valid ticket ID.');
-      }
-
-      // Limpiar ID
-      const cleanId = id.trim();
-
-      this.logger.debug(`Retrieving ticket ${cleanId} from database`, 'TicketService.findOne');
-      const item = await this.dynamoDBService.get(TABLE_NAMES.TICKETS, {
-        PK: `TICKET#${cleanId}`,
-        SK: `TICKET#${cleanId}`,
-      });
-
-      if (!item) {
-        this.logger.warn(`Ticket ${cleanId} not found`, 'TicketService.findOne');
-        throw new NotFoundException(`Ticket with ID '${cleanId}' not found. Please verify the ticket ID and try again.`);
-      }
-
-      this.logger.debug(`Ticket ${cleanId} found, loading items`, 'TicketService.findOne');
-      const ticket = TicketModel.fromDynamoDBItem(item);
-      
-      try {
-        ticket.items = await this.getTicketItems(ticket.id);
-      } catch (itemsError) {
-        this.logger.warn(`Error loading items for ticket ${cleanId}:`, itemsError.message, 'TicketService.findOne');
-        ticket.items = []; // Continuar con lista vacía de items
-      }
-
-      const duration = Date.now() - startTime;
-      this.logger.log(`Successfully retrieved ticket ${cleanId} in ${duration}ms`, 'TicketService.findOne');
-
-      return {
-        id: ticket.id,
-        userId: ticket.userId,
-        userName: ticket.userName,
-        barId: ticket.barId,
-        barName: ticket.barName,
-        eventId: ticket.eventId,
-        eventName: ticket.eventName,
-        status: ticket.status,
-        paymentMethod: ticket.paymentMethod,
-        subtotal: ticket.subtotal,
-        totalTax: ticket.totalTax,
-        total: ticket.total,
-        paidAmount: ticket.paidAmount,
-        changeAmount: ticket.changeAmount,
-        items: ticket.items,
-        notes: ticket.notes,
-        printed: ticket.printed,
-        createdAt: ticket.createdAt,
-        updatedAt: ticket.updatedAt,
-      };
-    } catch (error) {
-      const duration = Date.now() - startTime;
-      
-      // Re-lanzar errores conocidos
-      if (error instanceof BadRequestException) {
-        this.logger.warn(`Bad request when finding ticket after ${duration}ms: ${error.message}`, 'TicketService.findOne');
-        throw error;
-      }
-      
-      if (error instanceof NotFoundException) {
-        this.logger.warn(`Ticket not found after ${duration}ms: ${error.message}`, 'TicketService.findOne');
-        throw error;
-      }
-
-      // Log error completo para debugging
-      this.logger.error(`Unexpected error finding ticket after ${duration}ms:`, error.stack, 'TicketService.findOne');
-      
-      // Retornar error genérico pero informativo
-      throw new BadRequestException('Unable to retrieve ticket information at this time. Please verify the ticket ID and try again. If the problem persists, contact system administrator.');
-    }
+    const ticket = await this.ticketModel.findById(id);
+    if (!ticket)
+      throw new NotFoundException(`Ticket with ID '${id}' not found.`);
+    return this.mapTicket(ticket);
   }
 
   async update(id: string, updateTicketDto: UpdateTicketDto): Promise<ITicket> {
-    try {
-      if (!id) {
-        throw new BadRequestException('Ticket ID is required');
-      }
+    const ticket = await this.ticketModel.findById(id);
+    if (!ticket) throw new NotFoundException('Ticket not found');
 
-      // Verificar que el ticket existe
-      const existingTicket = await this.findOne(id);
-
-      if (existingTicket.status === 'paid' && updateTicketDto.status && updateTicketDto.status !== 'paid') {
-        throw new BadRequestException('Cannot modify status of a paid ticket');
-      }
-
-      const updateExpression: string[] = [];
-      const expressionAttributeValues: Record<string, any> = {};
-      const expressionAttributeNames: Record<string, string> = {};
-
-      if (updateTicketDto.notes !== undefined) {
-        updateExpression.push('#notes = :notes');
-        expressionAttributeNames['#notes'] = 'notes';
-        expressionAttributeValues[':notes'] = updateTicketDto.notes;
-      }
-
-      if (updateTicketDto.status !== undefined) {
-        updateExpression.push('#status = :status');
-        expressionAttributeNames['#status'] = 'status';
-        expressionAttributeValues[':status'] = updateTicketDto.status;
-      }
-
-      if (updateExpression.length === 0) {
-        throw new BadRequestException('No valid fields to update');
-      }
-
-      updateExpression.push('#updatedAt = :updatedAt');
-      expressionAttributeNames['#updatedAt'] = 'updatedAt';
-      expressionAttributeValues[':updatedAt'] = new Date().toISOString();
-
-      await this.dynamoDBService.update(
-        TABLE_NAMES.TICKETS,
-        { PK: `TICKET#${id}`, SK: `TICKET#${id}` },
-        `SET ${updateExpression.join(', ')}`,
-        expressionAttributeValues,
-        expressionAttributeNames
-      );
-
-      return this.findOne(id);
-    } catch (error) {
-      if (error instanceof BadRequestException || error instanceof NotFoundException) {
-        throw error;
-      }
-      console.error('Error updating ticket:', error);
-      throw new BadRequestException('Failed to update ticket. Please try again.');
+    if (
+      ticket.status === 'paid' &&
+      updateTicketDto.status &&
+      updateTicketDto.status !== 'paid'
+    ) {
+      throw new BadRequestException('Cannot modify status of a paid ticket');
     }
+
+    Object.assign(ticket, updateTicketDto);
+    const saved = await ticket.save();
+    return this.mapTicket(saved);
   }
 
   async delete(id: string): Promise<void> {
-    try {
-      if (!id) {
-        throw new BadRequestException('Ticket ID is required');
-      }
-
-      // Verificar que el ticket existe
-      await this.findOne(id);
-
-      // Eliminar items del ticket primero
-      const items = await this.getTicketItems(id);
-      for (const item of items) {
-        await this.dynamoDBService.delete(TABLE_NAMES.TICKET_ITEMS, {
-          PK: `TICKET#${id}`,
-          SK: `ITEM#${item.id}`,
-        });
-      }
-
-      // Eliminar el ticket
-      await this.dynamoDBService.delete(TABLE_NAMES.TICKETS, {
-        PK: `TICKET#${id}`,
-        SK: `TICKET#${id}`,
-      });
-    } catch (error) {
-      if (error instanceof BadRequestException || error instanceof NotFoundException) {
-        throw error;
-      }
-      console.error('Error deleting ticket:', error);
-      throw new BadRequestException('Failed to delete ticket. Please try again.');
-    }
+    const result = await this.ticketModel.findByIdAndDelete(id);
+    if (!result) throw new NotFoundException('Ticket not found');
   }
 
-  // ===== TICKET ITEMS =====
+  async addItem(
+    ticketId: string,
+    addItemDto: AddTicketItemDto,
+  ): Promise<ITicketItem> {
+    const ticket = await this.ticketModel.findById(ticketId);
+    if (!ticket) throw new NotFoundException('Ticket not found');
+    if (ticket.status !== 'open')
+      throw new BadRequestException('Cannot add items to a closed ticket');
 
-  async addItem(ticketId: string, addItemDto: AddTicketItemDto): Promise<ITicketItem> {
-    try {
-      // Verificar que el ticket existe y está abierto
-      const ticket = await this.findOne(ticketId);
-      
-      if (ticket.status !== 'open') {
-        throw new BadRequestException('Cannot add items to a closed ticket');
-      }
+    const product = await this.productService.findOne(addItemDto.productId);
+    if (!product.available || !product.active)
+      throw new BadRequestException('Product is not available');
+    if (product.stock < addItemDto.quantity)
+      throw new BadRequestException('Insufficient stock');
 
-      // Verificar que el producto existe y está disponible
-      const product = await this.productService.findOne(addItemDto.productId);
-      
-      if (!product.available || !product.active) {
-        throw new BadRequestException('Product is not available for sale');
-      }
+    const { unitPrice, taxRate } = await this.priceListService.resolveForBar(
+      ticket.barId,
+      product,
+    );
+    const subtotal = unitPrice * addItemDto.quantity;
+    const tax = subtotal * (taxRate / 100);
+    const total = subtotal + tax;
 
-      if (product.stock < addItemDto.quantity) {
-        throw new BadRequestException(`Insufficient stock. Available: ${product.stock}, requested: ${addItemDto.quantity}`);
-      }
+    const newItem = {
+      productId: product.id,
+      productName: product.name,
+      quantity: addItemDto.quantity,
+      unitPrice,
+      taxRate,
+      subtotal,
+      tax,
+      total,
+    };
 
-      // Crear nuevo item
-      const itemModel = new TicketItemModel({
-        ticketId,
-        productId: product.id,
-        productName: product.name,
-        quantity: addItemDto.quantity,
-        unitPrice: product.price,
-        taxRate: product.taxRate,
-      });
+    ticket.items.push(newItem as any);
+    this.recalculateTotals(ticket);
+    await ticket.save();
 
-      await this.dynamoDBService.put(TABLE_NAMES.TICKET_ITEMS, itemModel.toDynamoDBItem());
-
-      // Actualizar totales del ticket
-      await this.updateTicketTotals(ticketId);
-
-      return {
-        id: itemModel.id,
-        ticketId: itemModel.ticketId,
-        productId: itemModel.productId,
-        productName: itemModel.productName,
-        quantity: itemModel.quantity,
-        unitPrice: itemModel.unitPrice,
-        taxRate: itemModel.taxRate,
-        subtotal: itemModel.subtotal,
-        tax: itemModel.tax,
-        total: itemModel.total,
-        createdAt: itemModel.createdAt,
-        updatedAt: itemModel.updatedAt,
-      };
-    } catch (error) {
-      if (error instanceof BadRequestException || error instanceof NotFoundException) {
-        throw error;
-      }
-      console.error('Error adding ticket item:', error);
-      throw new BadRequestException('Failed to add item to ticket. Please try again.');
-    }
+    return ticket.items[ticket.items.length - 1] as any;
   }
 
-  async updateItem(ticketId: string, itemId: string, updateItemDto: UpdateTicketItemDto): Promise<ITicketItem> {
-    try {
-      // Verificar que el ticket existe y está abierto
-      const ticket = await this.findOne(ticketId);
-      
-      if (ticket.status !== 'open') {
-        throw new BadRequestException('Cannot modify items in a closed ticket');
-      }
+  async updateItem(
+    ticketId: string,
+    itemId: string,
+    updateItemDto: UpdateTicketItemDto,
+  ): Promise<ITicketItem> {
+    const ticket = await this.ticketModel.findById(ticketId);
+    if (!ticket) throw new NotFoundException('Ticket not found');
+    if (ticket.status !== 'open')
+      throw new BadRequestException('Cannot modify items in a closed ticket');
 
-      // Obtener el item
-      const item = await this.dynamoDBService.get(TABLE_NAMES.TICKET_ITEMS, {
-        PK: `TICKET#${ticketId}`,
-        SK: `ITEM#${itemId}`,
-      });
+    const item: any = ticket.items.find(
+      (i: any) => i._id.toString() === itemId,
+    );
+    if (!item) throw new NotFoundException('Ticket item not found');
 
-      if (!item) {
-        throw new NotFoundException(`Ticket item with ID '${itemId}' not found`);
-      }
+    const product = await this.productService.findOne(item.productId);
+    if (product.stock < updateItemDto.quantity)
+      throw new BadRequestException('Insufficient stock');
 
-      // Verificar stock disponible
-      const product = await this.productService.findOne(item.productId);
-      
-      if (product.stock < updateItemDto.quantity) {
-        throw new BadRequestException(`Insufficient stock. Available: ${product.stock}, requested: ${updateItemDto.quantity}`);
-      }
+    item.quantity = updateItemDto.quantity;
+    item.subtotal = item.unitPrice * item.quantity;
+    item.tax = item.subtotal * (item.taxRate / 100);
+    item.total = item.subtotal + item.tax;
 
-      // Actualizar cantidad y recalcular totales
-      await this.dynamoDBService.update(
-        TABLE_NAMES.TICKET_ITEMS,
-        { PK: `TICKET#${ticketId}`, SK: `ITEM#${itemId}` },
-        'SET #quantity = :quantity, #subtotal = :subtotal, #tax = :tax, #total = :total, #updatedAt = :updatedAt',
-        {
-          ':quantity': updateItemDto.quantity,
-          ':subtotal': item.unitPrice * updateItemDto.quantity,
-          ':tax': (item.unitPrice * updateItemDto.quantity) * (item.taxRate / 100),
-          ':total': (item.unitPrice * updateItemDto.quantity) * (1 + item.taxRate / 100),
-          ':updatedAt': new Date().toISOString(),
-        },
-        {
-          '#quantity': 'quantity',
-          '#subtotal': 'subtotal',
-          '#tax': 'tax',
-          '#total': 'total',
-          '#updatedAt': 'updatedAt',
-        }
-      );
+    this.recalculateTotals(ticket);
+    await ticket.save();
 
-      // Actualizar totales del ticket
-      await this.updateTicketTotals(ticketId);
-
-      return this.getTicketItem(ticketId, itemId);
-    } catch (error) {
-      if (error instanceof BadRequestException || error instanceof NotFoundException) {
-        throw error;
-      }
-      console.error('Error updating ticket item:', error);
-      throw new BadRequestException('Failed to update ticket item. Please try again.');
-    }
+    return item;
   }
 
   async removeItem(ticketId: string, itemId: string): Promise<void> {
-    try {
-      // Verificar que el ticket existe y está abierto
-      const ticket = await this.findOne(ticketId);
-      
-      if (ticket.status !== 'open') {
-        throw new BadRequestException('Cannot remove items from a closed ticket');
-      }
+    const ticket = await this.ticketModel.findById(ticketId);
+    if (!ticket) throw new NotFoundException('Ticket not found');
+    if (ticket.status !== 'open')
+      throw new BadRequestException('Cannot remove items from a closed ticket');
 
-      // Verificar que el item existe
-      const item = await this.dynamoDBService.get(TABLE_NAMES.TICKET_ITEMS, {
-        PK: `TICKET#${ticketId}`,
-        SK: `ITEM#${itemId}`,
-      });
-
-      if (!item) {
-        throw new NotFoundException(`Ticket item with ID '${itemId}' not found`);
-      }
-
-      // Eliminar el item
-      await this.dynamoDBService.delete(TABLE_NAMES.TICKET_ITEMS, {
-        PK: `TICKET#${ticketId}`,
-        SK: `ITEM#${itemId}`,
-      });
-
-      // Actualizar totales del ticket
-      await this.updateTicketTotals(ticketId);
-    } catch (error) {
-      if (error instanceof BadRequestException || error instanceof NotFoundException) {
-        throw error;
-      }
-      console.error('Error removing ticket item:', error);
-      throw new BadRequestException('Failed to remove ticket item. Please try again.');
-    }
+    ticket.items = ticket.items.filter(
+      (i: any) => i._id.toString() !== itemId,
+    ) as any;
+    this.recalculateTotals(ticket);
+    await ticket.save();
   }
 
-  // ===== PAYMENT PROCESSING =====
-
-  async processPayment(ticketId: string, paymentDto: ProcessPaymentDto): Promise<ITicket> {
-    try {
-      // Verificar que el ticket existe
-      const ticket = await this.findOne(ticketId);
-      
-      if (ticket.status !== 'open') {
-        throw new BadRequestException('Cannot process payment for a closed ticket');
-      }
-
-      if (ticket.items.length === 0) {
-        throw new BadRequestException('Cannot process payment for an empty ticket');
-      }
-
-      if (paymentDto.paidAmount < ticket.total) {
-        throw new BadRequestException(`Insufficient payment amount. Required: ${ticket.total}, provided: ${paymentDto.paidAmount}`);
-      }
-
-      // Calcular cambio
-      const changeAmount = paymentDto.paymentMethod === 'cash' ? Math.max(0, paymentDto.paidAmount - ticket.total) : 0;
-
-      // Actualizar ticket con información de pago
-      await this.dynamoDBService.update(
-        TABLE_NAMES.TICKETS,
-        { PK: `TICKET#${ticketId}`, SK: `TICKET#${ticketId}` },
-        'SET #status = :status, #paymentMethod = :paymentMethod, #paidAmount = :paidAmount, #changeAmount = :changeAmount, #updatedAt = :updatedAt',
-        {
-          ':status': 'paid',
-          ':paymentMethod': paymentDto.paymentMethod,
-          ':paidAmount': paymentDto.paidAmount,
-          ':changeAmount': changeAmount,
-          ':updatedAt': new Date().toISOString(),
-        },
-        {
-          '#status': 'status',
-          '#paymentMethod': 'paymentMethod',
-          '#paidAmount': 'paidAmount',
-          '#changeAmount': 'changeAmount',
-          '#updatedAt': 'updatedAt',
-        }
+  async processPayment(
+    ticketId: string,
+    paymentDto: ProcessPaymentDto,
+  ): Promise<ITicket> {
+    const ticket = await this.ticketModel.findById(ticketId);
+    if (!ticket) throw new NotFoundException('Ticket not found');
+    if (ticket.status !== 'open')
+      throw new BadRequestException(
+        'Cannot process payment for a closed ticket',
+      );
+    if (ticket.items.length === 0)
+      throw new BadRequestException(
+        'Cannot process payment for an empty ticket',
       );
 
-      // Actualizar stock de productos (sistema legacy)
-      for (const item of ticket.items) {
-        await this.productService.updateStock(item.productId, {
-          quantity: item.quantity,
-          type: 'subtract',
-          reason: `Ticket ${ticketId} - Sale`,
-        });
-      }
+    if (paymentDto.paidAmount < ticket.total) {
+      throw new BadRequestException(
+        `Insufficient payment amount. Required: ${ticket.total}`,
+      );
+    }
 
-      // Actualizar stock de barra (sistema nuevo)
-      try {
-        await this.stockService.processSaleStock(ticketId, ticket.items.map(item => ({
+    const changeAmount =
+      paymentDto.paymentMethod === 'cash'
+        ? Math.max(0, paymentDto.paidAmount - ticket.total)
+        : 0;
+
+    ticket.status = 'paid';
+    ticket.paymentMethod = paymentDto.paymentMethod;
+    ticket.paidAmount = paymentDto.paidAmount;
+    ticket.changeAmount = changeAmount;
+
+    for (const item of ticket.items) {
+      await this.productService.updateStock(item.productId, {
+        quantity: item.quantity,
+        type: 'subtract',
+        reason: `Ticket ${ticketId} - Sale`,
+      });
+    }
+
+    try {
+      await this.stockService.processSaleStock(
+        ticketId,
+        ticket.items.map((item) => ({
           productId: item.productId,
           quantity: item.quantity,
-        })), ticket.barId);
-      } catch (stockError) {
-        this.logger.warn(`Error processing stock for ticket ${ticketId}:`, stockError.message, 'TicketService.processPayment');
-        // No lanzar error para no interrumpir el pago, pero loggear el problema
-      }
-
-      return this.findOne(ticketId);
-    } catch (error) {
-      if (error instanceof BadRequestException || error instanceof NotFoundException) {
-        throw error;
-      }
-      console.error('Error processing payment:', error);
-      throw new BadRequestException('Failed to process payment. Please try again.');
+        })),
+        ticket.barId,
+      );
+    } catch (stockError) {
+      this.logger.warn(
+        `Error processing stock for ticket ${ticketId}:`,
+        stockError.message,
+      );
     }
-  }
 
-  // ===== STATISTICS =====
+    await ticket.save();
+    return this.mapTicket(ticket);
+  }
 
   async getStats(query: TicketStatsQueryDto = {}): Promise<ITicketStats> {
-    try {
-      const tickets = await this.findAll(query);
+    const filter: any = { status: 'paid' };
+    if (query.barId) filter.barId = query.barId;
+    if (query.eventId) filter.eventId = query.eventId;
 
-      const stats: ITicketStats = {
-        total: tickets.length,
-        open: tickets.filter(t => t.status === 'open').length,
-        paid: tickets.filter(t => t.status === 'paid').length,
-        cancelled: tickets.filter(t => t.status === 'cancelled').length,
-        refunded: tickets.filter(t => t.status === 'refunded').length,
-        totalRevenue: tickets.filter(t => t.status === 'paid').reduce((sum, t) => sum + t.total, 0),
-        averageTicketValue: 0,
-        mostSoldProducts: [],
-      };
+    if (query.dateFrom || query.dateTo) {
+      filter.createdAt = {};
+      if (query.dateFrom) filter.createdAt.$gte = new Date(query.dateFrom);
+      if (query.dateTo) filter.createdAt.$lte = new Date(query.dateTo);
+    }
 
-      // Calcular valor promedio
-      const paidTickets = tickets.filter(t => t.status === 'paid');
-      stats.averageTicketValue = paidTickets.length > 0 ? stats.totalRevenue / paidTickets.length : 0;
+    const tickets = await this.ticketModel.find(filter);
 
-      // Calcular productos más vendidos
-      const productSales: Map<string, { productId: string; productName: string; quantity: number; revenue: number }> = new Map();
-      
-      tickets.filter(t => t.status === 'paid').forEach(ticket => {
-        ticket.items.forEach(item => {
-          const existing = productSales.get(item.productId);
-          if (existing) {
-            existing.quantity += item.quantity;
-            existing.revenue += item.total;
-          } else {
-            productSales.set(item.productId, {
-              productId: item.productId,
-              productName: item.productName,
-              quantity: item.quantity,
-              revenue: item.total,
-            });
-          }
-        });
+    const totalRevenue = tickets.reduce((sum, t) => sum + t.total, 0);
+    const productSales = new Map<
+      string,
+      {
+        productId: string;
+        productName: string;
+        quantity: number;
+        revenue: number;
+      }
+    >();
+
+    tickets.forEach((ticket) => {
+      ticket.items.forEach((item) => {
+        const existing = productSales.get(item.productId) || {
+          productId: item.productId,
+          productName: item.productName,
+          quantity: 0,
+          revenue: 0,
+        };
+        existing.quantity += item.quantity;
+        existing.revenue += item.total;
+        productSales.set(item.productId, existing);
       });
-
-      stats.mostSoldProducts = Array.from(productSales.values())
-        .sort((a, b) => b.revenue - a.revenue)
-        .slice(0, query.topProducts || 10);
-
-      return stats;
-    } catch (error) {
-      console.error('Error getting ticket stats:', error);
-      throw new BadRequestException('Failed to retrieve ticket statistics. Please try again.');
-    }
-  }
-
-  // ===== AUXILIARY METHODS =====
-
-  private async getTicketItems(ticketId: string): Promise<ITicketItem[]> {
-    try {
-      const items = await this.dynamoDBService.query(
-        TABLE_NAMES.TICKET_ITEMS,
-        'PK = :pk',
-        { ':pk': `TICKET#${ticketId}` },
-        undefined,
-        undefined,
-        100
-      );
-
-      return items.map(item => ({
-        id: item.id,
-        ticketId: item.ticketId,
-        productId: item.productId,
-        productName: item.productName,
-        quantity: item.quantity,
-        unitPrice: item.unitPrice,
-        taxRate: item.taxRate,
-        subtotal: item.subtotal,
-        tax: item.tax,
-        total: item.total,
-        createdAt: item.createdAt,
-        updatedAt: item.updatedAt,
-      }));
-    } catch (error) {
-      console.error('Error getting ticket items:', error);
-      return [];
-    }
-  }
-
-  private async getTicketItem(ticketId: string, itemId: string): Promise<ITicketItem> {
-    const item = await this.dynamoDBService.get(TABLE_NAMES.TICKET_ITEMS, {
-      PK: `TICKET#${ticketId}`,
-      SK: `ITEM#${itemId}`,
     });
 
-    if (!item) {
-      throw new NotFoundException(`Ticket item with ID '${itemId}' not found`);
+    const mostSoldProducts = Array.from(productSales.values())
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, query.topProducts || 10);
+
+    const byList = new Map<
+      string,
+      {
+        priceListId: string | null;
+        priceListName: string | null;
+        ticketCount: number;
+        revenue: number;
+      }
+    >();
+    for (const t of tickets) {
+      const key = `${t.priceListId || '_none'}|${t.priceListName || ''}`;
+      const row = byList.get(key) || {
+        priceListId: t.priceListId || null,
+        priceListName: t.priceListName || null,
+        ticketCount: 0,
+        revenue: 0,
+      };
+      row.ticketCount += 1;
+      row.revenue += t.total || 0;
+      byList.set(key, row);
     }
+    const salesByPriceList = Array.from(byList.values()).sort(
+      (a, b) => b.revenue - a.revenue,
+    );
 
     return {
-      id: item.id,
-      ticketId: item.ticketId,
-      productId: item.productId,
-      productName: item.productName,
-      quantity: item.quantity,
-      unitPrice: item.unitPrice,
-      taxRate: item.taxRate,
-      subtotal: item.subtotal,
-      tax: item.tax,
-      total: item.total,
-      createdAt: item.createdAt,
-      updatedAt: item.updatedAt,
+      total: tickets.length,
+      open: 0,
+      paid: tickets.length,
+      cancelled: 0,
+      refunded: 0,
+      totalRevenue,
+      averageTicketValue:
+        tickets.length > 0 ? totalRevenue / tickets.length : 0,
+      mostSoldProducts,
+      salesByPriceList,
     };
   }
 
-  private async updateTicketTotals(ticketId: string): Promise<void> {
-    try {
-      const items = await this.getTicketItems(ticketId);
-      
-      const subtotal = items.reduce((sum, item) => sum + item.subtotal, 0);
-      const totalTax = items.reduce((sum, item) => sum + item.tax, 0);
-      const total = items.reduce((sum, item) => sum + item.total, 0);
-
-      await this.dynamoDBService.update(
-        TABLE_NAMES.TICKETS,
-        { PK: `TICKET#${ticketId}`, SK: `TICKET#${ticketId}` },
-        'SET #subtotal = :subtotal, #totalTax = :totalTax, #total = :total, #updatedAt = :updatedAt',
-        {
-          ':subtotal': subtotal,
-          ':totalTax': totalTax,
-          ':total': total,
-          ':updatedAt': new Date().toISOString(),
-        },
-        {
-          '#subtotal': 'subtotal',
-          '#totalTax': 'totalTax',
-          '#total': 'total',
-          '#updatedAt': 'updatedAt',
-        }
-      );
-    } catch (error) {
-      console.error('Error updating ticket totals:', error);
-      throw new BadRequestException('Failed to update ticket totals. Please try again.');
-    }
+  async getPrintFormat(id: string): Promise<any> {
+    const ticket = await this.findOne(id);
+    const config = await this.businessConfigService.getActiveConfig();
+    return this.thermalPrinterService.generatePrintFormat(
+      ticket,
+      config as any,
+    );
   }
 
-  // ===== TICKET PRINTING =====
-
-  async getPrintFormat(ticketId: string): Promise<ITicketPrintFormat> {
-    const startTime = Date.now();
-    this.logger.log(`Generating print format for ticket ${ticketId}`, 'TicketService.getPrintFormat');
-
-    try {
-      // Obtener ticket
-      const ticket = await this.findOne(ticketId);
-      
-      // Obtener configuración del negocio
-      this.logger.debug('Loading business configuration', 'TicketService.getPrintFormat');
-      const businessConfig = await this.businessConfigService.getActiveConfig();
-      
-      // Formatear fecha y hora
-      const ticketDate = new Date(ticket.createdAt);
-      const formattedDate = ticketDate.toLocaleDateString('es-ES', {
-        day: '2-digit',
-        month: '2-digit',
-        year: 'numeric'
-      });
-      const formattedTime = ticketDate.toLocaleTimeString('es-ES', {
-        hour: '2-digit',
-        minute: '2-digit'
-      });
-
-      // Formatear número de ticket
-      const ticketNumber = `TKT-${ticket.id.substring(0, 8).toUpperCase()}`;
-
-      // Obtener símbolo de moneda
-      const currencySymbol = this.getCurrencySymbol(businessConfig.currency);
-
-      const printFormat: ITicketPrintFormat = {
-        header: {
-          businessName: businessConfig.businessName,
-          businessAddress: businessConfig.businessAddress,
-          businessPhone: businessConfig.businessPhone,
-          businessTaxId: businessConfig.businessTaxId,
-          businessEmail: businessConfig.businessEmail,
-          businessLogo: businessConfig.businessLogo
-        },
-        ticket: {
-          ticketNumber: ticketNumber,
-          userName: ticket.userName,
-          barName: ticket.barName,
-          eventName: ticket.eventName,
-          date: formattedDate,
-          time: formattedTime,
-          currency: businessConfig.currency
-        },
-        items: ticket.items.map(item => ({
-          name: item.productName,
-          quantity: item.quantity,
-          unitPrice: item.unitPrice,
-          subtotal: item.subtotal,
-          taxRate: item.taxRate,
-          tax: item.tax
-        })),
-        totals: {
-          subtotal: ticket.subtotal,
-          tax: ticket.totalTax,
-          total: ticket.total,
-          currency: businessConfig.currency
-        },
-        payment: {
-          method: this.getPaymentMethodText(ticket.paymentMethod),
-          paidAmount: ticket.paidAmount || 0,
-          changeAmount: ticket.changeAmount || 0,
-          currency: businessConfig.currency
-        },
-        footer: {
-          thankYouMessage: businessConfig.thankYouMessage,
-          businessWebsite: businessConfig.businessWebsite,
-          receiptFooter: businessConfig.receiptFooter
-        },
-        printerSettings: {
-          paperWidth: businessConfig.printerSettings.paperWidth,
-          fontSize: businessConfig.printerSettings.fontSize,
-          fontFamily: businessConfig.printerSettings.fontFamily
-        }
-      };
-
-      const duration = Date.now() - startTime;
-      this.logger.log(`Print format generated successfully for ticket ${ticketId} in ${duration}ms`, 'TicketService.getPrintFormat');
-
-      return printFormat;
-    } catch (error) {
-      const duration = Date.now() - startTime;
-      
-      if (error instanceof BadRequestException || error instanceof NotFoundException) {
-        this.logger.warn(`Error generating print format after ${duration}ms: ${error.message}`, 'TicketService.getPrintFormat');
-        throw error;
-      }
-
-      this.logger.error(`Unexpected error generating print format after ${duration}ms:`, error.stack, 'TicketService.getPrintFormat');
-      throw new BadRequestException('Unable to generate print format at this time. Please try again later.');
-    }
+  async markAsPrinted(id: string): Promise<void> {
+    await this.ticketModel.findByIdAndUpdate(id, { $set: { printed: true } });
   }
 
-  async markAsPrinted(ticketId: string): Promise<void> {
-    try {
-      await this.dynamoDBService.update(
-        TABLE_NAMES.TICKETS,
-        { PK: `TICKET#${ticketId}`, SK: `TICKET#${ticketId}` },
-        'SET #printed = :printed, #updatedAt = :updatedAt',
-        {
-          ':printed': true,
-          ':updatedAt': new Date().toISOString(),
-        },
-        {
-          '#printed': 'printed',
-          '#updatedAt': 'updatedAt',
-        }
-      );
-    } catch (error) {
-      console.error('Error marking ticket as printed:', error);
-      throw new BadRequestException('Failed to mark ticket as printed. Please try again.');
-    }
+  private recalculateTotals(ticket: TicketDocument) {
+    ticket.subtotal = ticket.items.reduce((sum, i) => sum + i.subtotal, 0);
+    ticket.totalTax = ticket.items.reduce((sum, i) => sum + i.tax, 0);
+    ticket.total = ticket.items.reduce((sum, i) => sum + i.total, 0);
   }
 
-  private getPaymentMethodText(method?: string): string {
-    switch (method) {
-      case 'cash': return 'EFECTIVO';
-      case 'card': return 'TARJETA';
-      case 'transfer': return 'TRANSFERENCIA';
-      case 'administrator': return 'ADMINISTRADOR';
-      case 'dj': return 'DJ';
-      default: return 'PENDIENTE';
-    }
-  }
-
-  private getCurrencySymbol(currency: string): string {
-    switch (currency.toUpperCase()) {
-      case 'USD': return '$';
-      case 'EUR': return '€';
-      case 'GBP': return '£';
-      case 'MXN': return '$';
-      case 'PEN': return 'S/';
-      case 'COP': return '$';
-      case 'ARS': return '$';
-      case 'BRL': return 'R$';
-      default: return '$';
-    }
+  private mapTicket(ticket: TicketDocument): ITicket {
+    return {
+      id: ticket._id,
+      userId: ticket.userId,
+      userName: ticket.userName,
+      barId: ticket.barId,
+      barName: ticket.barName,
+      eventId: ticket.eventId,
+      eventName: ticket.eventName,
+      priceListId: ticket.priceListId,
+      priceListName: ticket.priceListName,
+      status: ticket.status,
+      paymentMethod: ticket.paymentMethod,
+      subtotal: ticket.subtotal,
+      totalTax: ticket.totalTax,
+      total: ticket.total,
+      paidAmount: ticket.paidAmount,
+      changeAmount: ticket.changeAmount,
+      items: ticket.items.map((i: any) => ({
+        id: i._id,
+        ticketId: ticket._id,
+        productId: i.productId,
+        productName: i.productName,
+        quantity: i.quantity,
+        unitPrice: i.unitPrice,
+        taxRate: i.taxRate,
+        subtotal: i.subtotal,
+        tax: i.tax,
+        total: i.total,
+        createdAt: i['createdAt']?.toISOString() || new Date().toISOString(),
+        updatedAt: i['updatedAt']?.toISOString() || new Date().toISOString(),
+      })),
+      notes: ticket.notes,
+      printed: ticket.printed,
+      createdAt: ticket['createdAt']?.toISOString() || new Date().toISOString(),
+      updatedAt: ticket['updatedAt']?.toISOString() || new Date().toISOString(),
+    };
   }
 }

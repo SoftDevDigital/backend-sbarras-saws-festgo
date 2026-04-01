@@ -1,5 +1,9 @@
 import { BaseModel } from './base.model';
-import { IProduct, IProductCreate, IProductUpdate } from '../interfaces/product.interface';
+import {
+  IProduct,
+  IProductCreate,
+  IProductUpdate,
+} from '../interfaces/product.interface';
 
 export class ProductModel extends BaseModel implements IProduct {
   public name: string;
@@ -17,7 +21,13 @@ export class ProductModel extends BaseModel implements IProduct {
   public available: boolean;
   public active: boolean;
 
-  constructor(data: IProductCreate & { id?: string; createdAt?: string; updatedAt?: string }) {
+  constructor(
+    data: IProductCreate & {
+      id?: string;
+      createdAt?: string;
+      updatedAt?: string;
+    },
+  ) {
     super();
     this.id = data.id || this.id; // Usar el ID generado por BaseModel
     this.name = data.name;

@@ -1,490 +1,374 @@
-import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
-import { DynamoDBService } from '../../shared/services/dynamodb.service';
-import { 
-  IDashboardMetrics, 
-  IReport, 
-  IAuditLog, 
-  ISystemSettings, 
-  IBackupInfo, 
-  INotification, 
-  IExportRequest 
+import {
+  Injectable,
+  Logger,
+  BadRequestException,
+  NotFoundException,
+} from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import {
+  IDashboardMetrics,
+  IReport,
+  IAuditLog,
+  ISystemSettings,
+  IBackupInfo,
+  INotification,
+  IExportRequest,
 } from '../../shared/interfaces/admin.interface';
-import { TABLE_NAMES } from '../../shared/config/dynamodb.config';
-import { 
-  DashboardQueryDto, 
-  ReportQueryDto, 
-  AuditQueryDto, 
-  SettingsQueryDto, 
-  UpdateSettingsDto, 
-  CreateBackupDto, 
-  RestoreBackupDto, 
-  CreateNotificationDto, 
-  ExportDataDto, 
-  SystemHealthDto 
+import {
+  DashboardQueryDto,
+  ReportQueryDto,
+  AuditQueryDto,
+  SettingsQueryDto,
+  UpdateSettingsDto,
+  CreateBackupDto,
+  RestoreBackupDto,
+  CreateNotificationDto,
+  ExportDataDto,
+  SystemHealthDto,
 } from '../dto/admin.dto';
+
+// Admin Entities
+import {
+  AuditLog,
+  AuditLogDocument,
+} from '../../shared/schemas/admin/audit-log.schema';
+import {
+  SystemSetting,
+  SystemSettingDocument,
+} from '../../shared/schemas/admin/system-setting.schema';
+import {
+  Backup,
+  BackupDocument,
+  AdminNotification,
+  AdminNotificationDocument,
+  DataExport,
+  DataExportDocument,
+} from '../../shared/schemas/admin/admin-extras.schema';
+
+// Metrics Entities
+import { Ticket, TicketDocument } from '../../shared/schemas/ticket.schema';
+import { Expense, ExpenseDocument } from '../../shared/schemas/expense.schema';
+import { Event, EventDocument } from '../../shared/schemas/event.schema';
+import {
+  Employee,
+  EmployeeDocument,
+} from '../../shared/schemas/employee.schema';
+import { Product, ProductDocument } from '../../shared/schemas/product.schema';
 
 @Injectable()
 export class AdminService {
   private readonly logger = new Logger(AdminService.name);
 
-  constructor(private readonly dynamoDBService: DynamoDBService) {}
+  constructor(
+    @InjectModel(AuditLog.name)
+    private readonly auditLogModel: Model<AuditLogDocument>,
+    @InjectModel(SystemSetting.name)
+    private readonly systemSettingModel: Model<SystemSettingDocument>,
+    @InjectModel(Backup.name)
+    private readonly backupModel: Model<BackupDocument>,
+    @InjectModel(AdminNotification.name)
+    private readonly notificationModel: Model<AdminNotificationDocument>,
+    @InjectModel(DataExport.name)
+    private readonly exportModel: Model<DataExportDocument>,
+    @InjectModel(Ticket.name)
+    private readonly ticketModel: Model<TicketDocument>,
+    @InjectModel(Expense.name)
+    private readonly expenseModel: Model<ExpenseDocument>,
+    @InjectModel(Event.name) private readonly eventModel: Model<EventDocument>,
+    @InjectModel(Employee.name)
+    private readonly employeeModel: Model<EmployeeDocument>,
+    @InjectModel(Product.name)
+    private readonly productModel: Model<ProductDocument>,
+  ) {}
 
-  async getDashboardMetrics(query: DashboardQueryDto): Promise<IDashboardMetrics> {
-    this.logger.log('Getting dashboard metrics', 'AdminService.getDashboardMetrics');
-
+  async getDashboardMetrics(
+    query: DashboardQueryDto,
+  ): Promise<IDashboardMetrics> {
     try {
       const now = new Date();
-      let dateFrom: Date;
-      let dateTo = now;
+      let dateFrom = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000); // Default 30 days
 
-      // Calcular fechas basadas en el período
-      switch (query.period) {
-        case 'today':
-          dateFrom = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-          break;
-        case 'week':
-          dateFrom = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-          break;
-        case 'month':
-          dateFrom = new Date(now.getFullYear(), now.getMonth(), 1);
-          break;
-        case 'quarter':
-          const quarter = Math.floor(now.getMonth() / 3);
-          dateFrom = new Date(now.getFullYear(), quarter * 3, 1);
-          break;
-        case 'year':
-          dateFrom = new Date(now.getFullYear(), 0, 1);
-          break;
-        default:
-          dateFrom = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000); // Últimos 30 días
-      }
+      if (query.dateFrom) dateFrom = new Date(query.dateFrom);
 
-      // Si se proporcionan fechas específicas, usarlas
-      if (query.dateFrom) {
-        dateFrom = new Date(query.dateFrom);
-      }
-      if (query.dateTo) {
-        dateTo = new Date(query.dateTo);
-      }
+      const filter: any = { createdAt: { $gte: dateFrom } };
+      if (query.eventId) filter.eventId = query.eventId;
 
-      // Obtener datos de diferentes tablas
-      const [tickets, expenses, events, employees, products] = await Promise.all([
-        this.getTicketsData(dateFrom, dateTo, query.eventId),
-        this.getExpensesData(dateFrom, dateTo, query.eventId),
-        this.getEventsData(),
-        this.getEmployeesData(),
-        this.getProductsData()
+      const [
+        tickets,
+        expenses,
+        activeEvents,
+        employeesCount,
+        lowStockProducts,
+      ] = await Promise.all([
+        this.ticketModel.find(filter),
+        this.expenseModel.find(filter),
+        this.eventModel.countDocuments({ status: 'active' }),
+        this.employeeModel.countDocuments({ status: 'active' }),
+        this.productModel.countDocuments({
+          $expr: { $lte: ['$stock', '$minStock'] },
+        }),
       ]);
 
-      const metrics: IDashboardMetrics = {
-        totalSales: tickets.totalAmount,
-        totalExpenses: expenses.totalAmount,
-        netProfit: tickets.totalAmount - expenses.totalAmount,
-        totalTickets: tickets.count,
-        activeEvents: events.activeCount,
-        totalEmployees: employees.count,
-        lowStockProducts: products.lowStockCount,
-        recentActivity: tickets.recentActivity
+      const totalSales = tickets.reduce((sum, t) => sum + t.total, 0);
+      const totalExpenses = expenses.reduce((sum, e) => sum + e.amount, 0);
+
+      const byList = new Map<
+        string,
+        {
+          priceListId: string | null;
+          priceListName: string | null;
+          ticketCount: number;
+          revenue: number;
+        }
+      >();
+      for (const t of tickets) {
+        const key = `${t.priceListId || '_none'}|${t.priceListName || ''}`;
+        const row = byList.get(key) || {
+          priceListId: t.priceListId || null,
+          priceListName: t.priceListName || null,
+          ticketCount: 0,
+          revenue: 0,
+        };
+        row.ticketCount += 1;
+        row.revenue += t.total || 0;
+        byList.set(key, row);
+      }
+      const salesByPriceList = Array.from(byList.values()).sort(
+        (a, b) => b.revenue - a.revenue,
+      );
+
+      return {
+        totalSales,
+        totalExpenses,
+        netProfit: totalSales - totalExpenses,
+        totalTickets: tickets.length,
+        activeEvents,
+        totalEmployees: employeesCount,
+        lowStockProducts,
+        salesByPriceList,
+        recentActivity: tickets.slice(0, 10).map((t) => ({
+          id: t._id,
+          type: 'ticket',
+          action: 'created',
+          description: `Venta - Ticket #${t._id}${
+            t.priceListName ? ` · Lista: ${t.priceListName}` : ''
+          }`,
+          amount: t.total,
+          userId: t.userId,
+          userName: t.userName,
+          timestamp: t['createdAt']?.toISOString(),
+        })),
       };
-
-      this.logger.log(`Dashboard metrics calculated successfully`, 'AdminService.getDashboardMetrics');
-      return metrics;
-
     } catch (error) {
-      this.logger.error(`Error getting dashboard metrics:`, error.stack, 'AdminService.getDashboardMetrics');
+      this.logger.error('Error fetching dashboard metrics:', error.message);
       throw new BadRequestException('Failed to get dashboard metrics');
     }
   }
 
-  async generateReport(query: any): Promise<IReport> {
+  async generateReport(query: ReportQueryDto): Promise<IReport | any> {
     const reportType = query.type || 'sales';
-    this.logger.log(`Generating ${reportType} report`, 'AdminService.generateReport');
+    const reportId = `report_${Date.now()}`;
 
-    try {
-      const reportId = `report_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      
-      // Datos simulados para evitar errores de base de datos
-      const data: any[] = [
-        { id: '1', amount: 100, description: 'Sample data' }
-      ];
-      
-      const summary = {
-        totalRecords: data.length,
-        totalAmount: 100,
-        averageAmount: 100
-      };
-
-      const report: IReport = {
-        id: reportId,
-        type: reportType as any,
-        title: `${reportType.charAt(0).toUpperCase() + reportType.slice(1)} Report`,
-        description: `Report generated for ${reportType} data`,
-        data,
-        summary,
-        generatedAt: new Date().toISOString(),
-        generatedBy: 'system',
-        period: {
-          from: query.dateFrom || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
-          to: query.dateTo || new Date().toISOString()
-        }
-      };
-
-      this.logger.log(`Report ${reportId} generated successfully`, 'AdminService.generateReport');
-      return report;
-
-    } catch (error) {
-      this.logger.error(`Error generating report:`, error.stack, 'AdminService.generateReport');
-      throw new BadRequestException('Failed to generate report');
-    }
-  }
-
-  async getAuditLogs(query: AuditQueryDto): Promise<IAuditLog[]> {
-    this.logger.log('Getting audit logs', 'AdminService.getAuditLogs');
-
-    try {
-      // Por ahora retornar logs simulados hasta implementar la tabla de auditoría
-      const mockLogs: IAuditLog[] = [
-        {
-          id: 'audit_1',
-          userId: 'user_1',
-          userName: 'admin@bar.com',
-          userRole: 'admin',
-          action: 'CREATE',
-          resource: 'expense',
-          resourceId: 'expense_1',
-          changes: {
-            before: null,
-            after: { amount: 100, description: 'Test expense' }
-          },
-          ipAddress: '192.168.1.1',
-          userAgent: 'Mozilla/5.0...',
-          timestamp: new Date().toISOString()
-        }
-      ];
-
-      this.logger.log(`Retrieved ${mockLogs.length} audit logs`, 'AdminService.getAuditLogs');
-      return mockLogs;
-
-    } catch (error) {
-      this.logger.error(`Error getting audit logs:`, error.stack, 'AdminService.getAuditLogs');
-      throw new BadRequestException('Failed to get audit logs');
-    }
-  }
-
-  async getSystemSettings(query: SettingsQueryDto): Promise<ISystemSettings[]> {
-    this.logger.log('Getting system settings', 'AdminService.getSystemSettings');
-
-    try {
-      const mockSettings: ISystemSettings[] = [
-        {
-          id: 'setting_1',
-          category: 'general',
-          key: 'business_name',
-          value: 'Bar System',
-          description: 'Nombre del negocio',
-          isEditable: true,
-          updatedAt: new Date().toISOString(),
-          updatedBy: 'admin@bar.com'
-        },
-        {
-          id: 'setting_2',
-          category: 'notifications',
-          key: 'email_enabled',
-          value: true,
-          description: 'Habilitar notificaciones por email',
-          isEditable: true,
-          updatedAt: new Date().toISOString(),
-          updatedBy: 'admin@bar.com'
-        }
-      ];
-
-      this.logger.log(`Retrieved ${mockSettings.length} system settings`, 'AdminService.getSystemSettings');
-      return mockSettings;
-
-    } catch (error) {
-      this.logger.error(`Error getting system settings:`, error.stack, 'AdminService.getSystemSettings');
-      throw new BadRequestException('Failed to get system settings');
-    }
-  }
-
-  async updateSystemSettings(updateDto: UpdateSettingsDto): Promise<ISystemSettings> {
-    this.logger.log(`Updating system setting: ${updateDto.key}`, 'AdminService.updateSystemSettings');
-
-    try {
-      // Implementar lógica de actualización de configuración
-      const updatedSetting: ISystemSettings = {
-        id: `setting_${Date.now()}`,
-        category: 'general',
-        key: updateDto.key,
-        value: updateDto.value,
-        description: updateDto.description || '',
-        isEditable: true,
-        updatedAt: new Date().toISOString(),
-        updatedBy: 'admin@bar.com'
-      };
-
-      this.logger.log(`Setting ${updateDto.key} updated successfully`, 'AdminService.updateSystemSettings');
-      return updatedSetting;
-
-    } catch (error) {
-      this.logger.error(`Error updating system setting:`, error.stack, 'AdminService.updateSystemSettings');
-      throw new BadRequestException('Failed to update system setting');
-    }
-  }
-
-  async createBackup(createDto: CreateBackupDto): Promise<IBackupInfo> {
-    this.logger.log('Creating backup', 'AdminService.createBackup');
-
-    try {
-      const backupId = `backup_${Date.now()}`;
-      const backupInfo: IBackupInfo = {
-        id: backupId,
-        filename: `backup_${new Date().toISOString().split('T')[0]}.json`,
-        size: 0, // Se calculará después
-        type: createDto.type || 'full',
-        status: 'pending',
-        createdAt: new Date().toISOString(),
-        createdBy: 'admin@bar.com'
-      };
-
-      // Simular creación de backup
-      setTimeout(async () => {
-        backupInfo.status = 'completed';
-        backupInfo.size = 1024000; // 1MB simulado
-        backupInfo.downloadUrl = `/admin/backup/${backupId}/download`;
-        
-        await this.dynamoDBService.put(TABLE_NAMES.BACKUPS, {
-          PK: `BACKUP#${backupId}`,
-          SK: `BACKUP#${backupId}`,
-          ...backupInfo
-        });
-      }, 2000);
-
-      this.logger.log(`Backup ${backupId} creation initiated`, 'AdminService.createBackup');
-      return backupInfo;
-
-    } catch (error) {
-      this.logger.error(`Error creating backup:`, error.stack, 'AdminService.createBackup');
-      throw new BadRequestException('Failed to create backup');
-    }
-  }
-
-  async restoreBackup(restoreDto: RestoreBackupDto): Promise<{ message: string }> {
-    this.logger.log(`Restoring backup: ${restoreDto.backupId}`, 'AdminService.restoreBackup');
-
-    try {
-      if (!restoreDto.confirmRestore) {
-        throw new BadRequestException('Restore confirmation required');
+    if (reportType === 'sales') {
+      const filter: any = { status: 'paid' };
+      if (query.eventId) filter.eventId = query.eventId;
+      if (query.dateFrom || query.dateTo) {
+        filter.createdAt = {};
+        if (query.dateFrom) filter.createdAt.$gte = new Date(query.dateFrom);
+        if (query.dateTo) filter.createdAt.$lte = new Date(query.dateTo);
       }
 
-      // Simular restauración de backup
-      this.logger.log(`Backup ${restoreDto.backupId} restored successfully`, 'AdminService.restoreBackup');
-      return { message: 'Backup restored successfully' };
+      const tickets = await this.ticketModel
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .lean();
 
-    } catch (error) {
-      this.logger.error(`Error restoring backup:`, error.stack, 'AdminService.restoreBackup');
-      throw new BadRequestException('Failed to restore backup');
-    }
-  }
+      const totalAmount = tickets.reduce((s, t) => s + (t.total || 0), 0);
 
-  async createNotification(createDto: CreateNotificationDto): Promise<INotification> {
-    this.logger.log(`Creating ${createDto.type} notification`, 'AdminService.createNotification');
+      const byList = new Map<
+        string,
+        {
+          priceListId: string | null;
+          priceListName: string;
+          ticketCount: number;
+          revenue: number;
+        }
+      >();
+      for (const t of tickets) {
+        const key = `${t.priceListId || '_sin_lista'}|${t.priceListName || ''}`;
+        const name =
+          t.priceListName ||
+          (t.priceListId ? '(lista sin nombre)' : 'Precio catálogo (barra sin lista)');
+        const row = byList.get(key) || {
+          priceListId: t.priceListId || null,
+          priceListName: name,
+          ticketCount: 0,
+          revenue: 0,
+        };
+        row.ticketCount += 1;
+        row.revenue += t.total || 0;
+        byList.set(key, row);
+      }
 
-    try {
-      const notificationId = `notif_${Date.now()}`;
-      const notification: INotification = {
-        id: notificationId,
-        type: createDto.type,
-        recipient: createDto.recipient,
-        subject: createDto.subject,
-        message: createDto.message,
-        status: 'pending',
-        priority: createDto.priority || 'medium',
-        scheduledAt: createDto.scheduledAt,
-        createdAt: new Date().toISOString(),
-        createdBy: 'admin@bar.com'
-      };
+      const data = tickets.map((t) => ({
+        ticketId: t._id,
+        createdAt: t['createdAt'],
+        total: t.total,
+        subtotal: t.subtotal,
+        totalTax: t.totalTax,
+        barId: t.barId,
+        barName: t.barName,
+        eventId: t.eventId,
+        eventName: t.eventName,
+        priceListId: t.priceListId || null,
+        priceListName: t.priceListName || null,
+        paymentMethod: t.paymentMethod,
+        userName: t.userName,
+        itemsCount: (t.items || []).length,
+      }));
 
-      // Simular envío de notificación
-      setTimeout(async () => {
-        notification.status = 'sent';
-        notification.sentAt = new Date().toISOString();
-        
-        await this.dynamoDBService.put(TABLE_NAMES.NOTIFICATIONS, {
-          PK: `NOTIF#${notificationId}`,
-          SK: `NOTIF#${notificationId}`,
-          ...notification
-        });
-      }, 1000);
-
-      this.logger.log(`Notification ${notificationId} created successfully`, 'AdminService.createNotification');
-      return notification;
-
-    } catch (error) {
-      this.logger.error(`Error creating notification:`, error.stack, 'AdminService.createNotification');
-      throw new BadRequestException('Failed to create notification');
-    }
-  }
-
-  async exportData(exportDto: ExportDataDto): Promise<IExportRequest> {
-    this.logger.log(`Exporting ${exportDto.entity} data to ${exportDto.format}`, 'AdminService.exportData');
-
-    try {
-      const exportId = `export_${Date.now()}`;
-      const exportRequest: IExportRequest = {
-        id: exportId,
-        type: exportDto.format,
-        entity: exportDto.entity,
-        filters: {
-          dateFrom: exportDto.dateFrom,
-          dateTo: exportDto.dateTo,
-          eventId: exportDto.eventId,
-          userId: exportDto.userId,
-          status: exportDto.status
+      return {
+        id: reportId,
+        type: 'sales',
+        title: 'Reporte de ventas',
+        description:
+          'Tickets pagados con lista de precios y barra/evento. Cada fila es un ticket; los totales por lista usan el snapshot guardado al vender.',
+        data,
+        summary: {
+          totalRecords: tickets.length,
+          totalAmount,
+          averageAmount:
+            tickets.length > 0 ? totalAmount / tickets.length : 0,
+          topItems: Array.from(byList.values())
+            .sort((a, b) => b.revenue - a.revenue)
+            .map((row) => ({
+              name: row.priceListName,
+              value: row.revenue,
+              percentage:
+                totalAmount > 0 ? (row.revenue / totalAmount) * 100 : 0,
+            })),
         },
-        status: 'pending',
-        createdAt: new Date().toISOString(),
-        createdBy: 'admin@bar.com'
+        salesByPriceList: Array.from(byList.values()).sort(
+          (a, b) => b.revenue - a.revenue,
+        ),
+        generatedAt: new Date().toISOString(),
+        generatedBy: 'system',
+        period: { from: query.dateFrom, to: query.dateTo },
       };
-
-      // Simular exportación de datos
-      setTimeout(async () => {
-        exportRequest.status = 'completed';
-        exportRequest.downloadUrl = `/admin/export/${exportId}/download`;
-        exportRequest.completedAt = new Date().toISOString();
-        
-        await this.dynamoDBService.put(TABLE_NAMES.EXPORTS, {
-          PK: `EXPORT#${exportId}`,
-          SK: `EXPORT#${exportId}`,
-          ...exportRequest
-        });
-      }, 3000);
-
-      this.logger.log(`Export ${exportId} initiated successfully`, 'AdminService.exportData');
-      return exportRequest;
-
-    } catch (error) {
-      this.logger.error(`Error exporting data:`, error.stack, 'AdminService.exportData');
-      throw new BadRequestException('Failed to export data');
     }
+
+    return {
+      id: reportId,
+      type: reportType,
+      title: `${reportType.toUpperCase()} Report`,
+      description: `Generated report for ${reportType}`,
+      data: [],
+      summary: { totalRecords: 0, totalAmount: 0 },
+      generatedAt: new Date().toISOString(),
+      generatedBy: 'system',
+      period: { from: query.dateFrom, to: query.dateTo },
+    };
+  }
+
+  async getAuditLogs(query: AuditQueryDto): Promise<IAuditLog[] | any[]> {
+    const filter: any = {};
+    if (query.userId) filter.userId = query.userId;
+    if (query.action) filter.action = query.action;
+    if (query.resource) filter.resource = query.resource;
+
+    const logs = await this.auditLogModel
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .limit(100);
+    return logs;
+  }
+
+  async getSystemSettings(
+    query: SettingsQueryDto,
+  ): Promise<ISystemSettings[] | any[]> {
+    const filter: any = {};
+    if (query.category) filter.category = query.category;
+
+    const settings = await this.systemSettingModel.find(filter);
+    return settings;
+  }
+
+  async updateSystemSettings(
+    updateDto: UpdateSettingsDto,
+  ): Promise<ISystemSettings | any> {
+    const updated = await this.systemSettingModel.findOneAndUpdate(
+      { key: updateDto.key },
+      {
+        $set: {
+          value: updateDto.value,
+          updatedAt: new Date(),
+          updatedBy: 'admin',
+        },
+      },
+      { new: true, upsert: true },
+    );
+    return updated;
+  }
+
+  async createBackup(createDto: CreateBackupDto): Promise<IBackupInfo | any> {
+    const newBackup = new this.backupModel({
+      filename: `backup_${Date.now()}.json`,
+      size: 0,
+      type: createDto.type || 'full',
+      status: 'pending',
+      createdBy: 'admin',
+    });
+    return await newBackup.save();
+  }
+
+  async restoreBackup(
+    restoreDto: RestoreBackupDto,
+  ): Promise<{ message: string }> {
+    return { message: 'Restore initiated' };
+  }
+
+  async createNotification(
+    createDto: CreateNotificationDto,
+  ): Promise<INotification | any> {
+    const newNotif = new this.notificationModel({
+      ...createDto,
+      status: 'pending',
+      createdBy: 'admin',
+    });
+    return await newNotif.save();
+  }
+
+  async exportData(exportDto: ExportDataDto): Promise<IExportRequest | any> {
+    const newExport = new this.exportModel({
+      type: exportDto.format,
+      entity: exportDto.entity,
+      filters: exportDto,
+      status: 'pending',
+      createdBy: 'admin',
+    });
+    return await newExport.save();
   }
 
   async getSystemHealth(): Promise<SystemHealthDto> {
-    this.logger.log('Getting system health', 'AdminService.getSystemHealth');
-
-    try {
-      const health: SystemHealthDto = {
-        status: 'healthy',
-        uptime: process.uptime(),
-        memory: {
-          used: process.memoryUsage().heapUsed,
-          total: process.memoryUsage().heapTotal,
-          percentage: (process.memoryUsage().heapUsed / process.memoryUsage().heapTotal) * 100
-        },
-        database: {
-          status: 'connected',
-          responseTime: 50 // ms simulado
-        },
-        services: [
-          { name: 'Auth Service', status: 'up', responseTime: 25 },
-          { name: 'Events Service', status: 'up', responseTime: 30 },
-          { name: 'Products Service', status: 'up', responseTime: 20 }
-        ],
-        lastBackup: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-        activeUsers: 5,
-        timestamp: new Date().toISOString()
-      };
-
-      this.logger.log('System health retrieved successfully', 'AdminService.getSystemHealth');
-      return health;
-
-    } catch (error) {
-      this.logger.error(`Error getting system health:`, error.stack, 'AdminService.getSystemHealth');
-      throw new BadRequestException('Failed to get system health');
-    }
-  }
-
-  // Métodos auxiliares privados
-  private async getTicketsData(dateFrom: Date, dateTo: Date, eventId?: string): Promise<any> {
-    // Implementar lógica para obtener datos de tickets
     return {
-      totalAmount: 1500,
-      count: 25,
-      recentActivity: []
+      status: 'healthy',
+      uptime: process.uptime(),
+      memory: {
+        used: process.memoryUsage().heapUsed,
+        total: process.memoryUsage().heapTotal,
+        percentage:
+          (process.memoryUsage().heapUsed / process.memoryUsage().heapTotal) *
+          100,
+      },
+      database: {
+        status: 'connected',
+        responseTime: 10,
+      },
+      services: [{ name: 'Core', status: 'up', responseTime: 5 }],
+      lastBackup: new Date().toISOString(),
+      activeUsers: 1,
+      timestamp: new Date().toISOString(),
     };
-  }
-
-  private async getExpensesData(dateFrom: Date, dateTo: Date, eventId?: string): Promise<any> {
-    // Implementar lógica para obtener datos de gastos
-    return {
-      totalAmount: 300,
-      count: 8
-    };
-  }
-
-  private async getEventsData(): Promise<any> {
-    // Implementar lógica para obtener datos de eventos
-    return {
-      activeCount: 2
-    };
-  }
-
-  private async getEmployeesData(): Promise<any> {
-    // Implementar lógica para obtener datos de empleados
-    return {
-      count: 12
-    };
-  }
-
-  private async getProductsData(): Promise<any> {
-    // Implementar lógica para obtener datos de productos
-    return {
-      lowStockCount: 3
-    };
-  }
-
-  private async getSalesReportData(query: ReportQueryDto): Promise<any[]> {
-    // Implementar lógica para obtener datos de reporte de ventas
-    return [];
-  }
-
-  private async getExpensesReportData(query: ReportQueryDto): Promise<any[]> {
-    // Implementar lógica para obtener datos de reporte de gastos
-    return [];
-  }
-
-  private async getStaffReportData(query: ReportQueryDto): Promise<any[]> {
-    // Implementar lógica para obtener datos de reporte de personal
-    return [];
-  }
-
-  private async getInventoryReportData(query: ReportQueryDto): Promise<any[]> {
-    // Implementar lógica para obtener datos de reporte de inventario
-    return [];
-  }
-
-  private async getEventsReportData(query: ReportQueryDto): Promise<any[]> {
-    // Implementar lógica para obtener datos de reporte de eventos
-    return [];
-  }
-
-  private calculateSalesSummary(data: any[]): any {
-    return { totalRecords: data.length };
-  }
-
-  private calculateExpensesSummary(data: any[]): any {
-    return { totalRecords: data.length };
-  }
-
-  private calculateStaffSummary(data: any[]): any {
-    return { totalRecords: data.length };
-  }
-
-  private calculateInventorySummary(data: any[]): any {
-    return { totalRecords: data.length };
-  }
-
-  private calculateEventsSummary(data: any[]): any {
-    return { totalRecords: data.length };
   }
 }

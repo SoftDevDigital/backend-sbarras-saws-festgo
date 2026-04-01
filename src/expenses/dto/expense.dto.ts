@@ -1,4 +1,12 @@
-import { IsString, IsEnum, IsNumber, Min, IsOptional, IsNotEmpty, MaxLength } from 'class-validator';
+import {
+  IsString,
+  IsEnum,
+  IsNumber,
+  Min,
+  IsOptional,
+  IsNotEmpty,
+  MaxLength,
+} from 'class-validator';
 
 export class CreateExpenseDto {
   @IsString()
@@ -6,7 +14,7 @@ export class CreateExpenseDto {
   eventId: string;
 
   @IsEnum(['supplies', 'staff', 'equipment', 'other'], {
-    message: 'Type must be one of: supplies, staff, equipment, other'
+    message: 'Type must be one of: supplies, staff, equipment, other',
   })
   type: 'supplies' | 'staff' | 'equipment' | 'other';
 
@@ -23,7 +31,7 @@ export class CreateExpenseDto {
 export class UpdateExpenseDto {
   @IsOptional()
   @IsEnum(['supplies', 'staff', 'equipment', 'other'], {
-    message: 'Type must be one of: supplies, staff, equipment, other'
+    message: 'Type must be one of: supplies, staff, equipment, other',
   })
   type?: 'supplies' | 'staff' | 'equipment' | 'other';
 

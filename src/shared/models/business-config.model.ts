@@ -61,7 +61,7 @@ export class BusinessConfigModel extends BaseModel implements IBusinessConfig {
 
   constructor(data?: IBusinessConfigCreate) {
     super();
-    
+
     if (data) {
       this.businessName = data.businessName;
       this.businessAddress = data.businessAddress;
@@ -77,7 +77,7 @@ export class BusinessConfigModel extends BaseModel implements IBusinessConfig {
       this.printerSettings = {
         paperWidth: data.printerSettings?.paperWidth || 80,
         fontSize: data.printerSettings?.fontSize || 12,
-        fontFamily: data.printerSettings?.fontFamily || 'monospace'
+        fontFamily: data.printerSettings?.fontFamily || 'monospace',
       };
     } else {
       this.businessName = '';
@@ -94,7 +94,7 @@ export class BusinessConfigModel extends BaseModel implements IBusinessConfig {
       this.printerSettings = {
         paperWidth: 80,
         fontSize: 12,
-        fontFamily: 'monospace'
+        fontFamily: 'monospace',
       };
     }
   }
@@ -123,7 +123,7 @@ export class BusinessConfigModel extends BaseModel implements IBusinessConfig {
 
   static fromDynamoDBItem(item: Record<string, any>): BusinessConfigModel {
     const config = new BusinessConfigModel();
-    
+
     config.id = item.id;
     config.businessName = item.businessName;
     config.businessAddress = item.businessAddress;
@@ -139,7 +139,7 @@ export class BusinessConfigModel extends BaseModel implements IBusinessConfig {
     config.printerSettings = item.printerSettings;
     config.createdAt = item.createdAt;
     config.updatedAt = item.updatedAt;
-    
+
     return config;
   }
 }

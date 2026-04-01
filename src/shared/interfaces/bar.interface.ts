@@ -3,6 +3,10 @@ export interface IBar {
   name: string;
   eventId: string;
   printer: string;
+  /** Lista de precios asociada (opcional) */
+  priceListId?: string;
+  /** Nombre legible de la lista (solo en findOne cuando aplica) */
+  priceListName?: string;
   status: 'active' | 'closed';
   createdAt: string;
   updatedAt: string;
@@ -12,11 +16,13 @@ export interface IBarCreate {
   name: string;
   eventId: string;
   printer: string;
+  priceListId?: string;
 }
 
 export interface IBarUpdate {
   name?: string;
   printer?: string;
+  priceListId?: string;
   status?: 'active' | 'closed';
 }
 

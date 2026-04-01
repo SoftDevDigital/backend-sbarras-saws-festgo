@@ -1,9 +1,9 @@
 import { BaseModel } from './base.model';
-import { 
-  ITicket, 
-  ITicketCreate, 
-  ITicketItem, 
-  ITicketItemCreate 
+import {
+  ITicket,
+  ITicketCreate,
+  ITicketItem,
+  ITicketItemCreate,
 } from '../interfaces/ticket.interface';
 
 export class TicketItemModel extends BaseModel implements ITicketItem {
@@ -17,7 +17,14 @@ export class TicketItemModel extends BaseModel implements ITicketItem {
   tax: number;
   total: number;
 
-  constructor(data: ITicketItemCreate & { ticketId: string, productName: string, unitPrice: number, taxRate: number }) {
+  constructor(
+    data: ITicketItemCreate & {
+      ticketId: string;
+      productName: string;
+      unitPrice: number;
+      taxRate: number;
+    },
+  ) {
     super();
     this.ticketId = data.ticketId;
     this.productId = data.productId;
@@ -25,7 +32,7 @@ export class TicketItemModel extends BaseModel implements ITicketItem {
     this.quantity = data.quantity;
     this.unitPrice = data.unitPrice;
     this.taxRate = data.taxRate;
-    
+
     // Calcular totales
     this.subtotal = this.unitPrice * this.quantity;
     this.tax = this.subtotal * (this.taxRate / 100);
@@ -60,11 +67,11 @@ export class TicketItemModel extends BaseModel implements ITicketItem {
       unitPrice: item.unitPrice,
       taxRate: item.taxRate,
     });
-    
+
     ticketItem.id = item.id;
     ticketItem.createdAt = item.createdAt;
     ticketItem.updatedAt = item.updatedAt;
-    
+
     return ticketItem;
   }
 
@@ -95,16 +102,18 @@ export class TicketModel extends BaseModel implements ITicket {
   notes?: string;
   printed: boolean;
 
-  constructor(data?: ITicketCreate & { 
-    userId: string, 
-    userName: string, 
-    barId: string, 
-    barName: string, 
-    eventId: string, 
-    eventName: string 
-  }) {
+  constructor(
+    data?: ITicketCreate & {
+      userId: string;
+      userName: string;
+      barId: string;
+      barName: string;
+      eventId: string;
+      eventName: string;
+    },
+  ) {
     super();
-    
+
     if (data) {
       this.userId = data.userId;
       this.userName = data.userName;
@@ -174,7 +183,7 @@ export class TicketModel extends BaseModel implements ITicket {
       eventId: item.eventId,
       eventName: item.eventName,
     });
-    
+
     ticket.id = item.id;
     ticket.status = item.status;
     ticket.paymentMethod = item.paymentMethod;
@@ -187,7 +196,7 @@ export class TicketModel extends BaseModel implements ITicket {
     ticket.printed = item.printed || false;
     ticket.createdAt = item.createdAt;
     ticket.updatedAt = item.updatedAt;
-    
+
     return ticket;
   }
 
@@ -207,15 +216,19 @@ export class TicketModel extends BaseModel implements ITicket {
 
   // Remover item del ticket
   removeItem(itemId: string): void {
-    this.items = this.items.filter(item => item.id !== itemId);
+    this.items = this.items.filter((item) => item.id !== itemId);
     this.recalculateTotals();
   }
 
   // Procesar pago
-  processPayment(paymentMethod: 'cash' | 'card' | 'transfer' | 'administrator' | 'dj', paidAmount: number): void {
+  processPayment(
+    paymentMethod: 'cash' | 'card' | 'transfer' | 'administrator' | 'dj',
+    paidAmount: number,
+  ): void {
     this.paymentMethod = paymentMethod;
     this.paidAmount = paidAmount;
-    this.changeAmount = paymentMethod === 'cash' ? Math.max(0, paidAmount - this.total) : 0;
+    this.changeAmount =
+      paymentMethod === 'cash' ? Math.max(0, paidAmount - this.total) : 0;
     this.status = 'paid';
     this.updateTimestamp();
   }

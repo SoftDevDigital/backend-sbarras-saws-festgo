@@ -7,6 +7,13 @@ export interface IDashboardMetrics {
   totalEmployees: number;
   lowStockProducts: number;
   recentActivity: IRecentActivity[];
+  /** Ventas del periodo agrupadas por lista de precios (snapshot en ticket) */
+  salesByPriceList?: Array<{
+    priceListId: string | null;
+    priceListName: string | null;
+    ticketCount: number;
+    revenue: number;
+  }>;
 }
 
 export interface IRecentActivity {
@@ -101,7 +108,13 @@ export interface INotification {
 export interface IExportRequest {
   id: string;
   type: 'excel' | 'pdf' | 'csv' | 'json';
-  entity: 'tickets' | 'expenses' | 'employees' | 'products' | 'events' | 'audit';
+  entity:
+    | 'tickets'
+    | 'expenses'
+    | 'employees'
+    | 'products'
+    | 'events'
+    | 'audit';
   filters?: {
     dateFrom?: string;
     dateTo?: string;

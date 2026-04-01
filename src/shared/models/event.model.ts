@@ -9,7 +9,7 @@ export class EventModel extends BaseModel implements IEvent {
 
   constructor(data?: IEventCreate) {
     super();
-    
+
     if (data) {
       this.name = data.name;
       this.startDate = data.startDate;
@@ -41,7 +41,7 @@ export class EventModel extends BaseModel implements IEvent {
 
   static fromDynamoDBItem(item: Record<string, any>): EventModel {
     const event = new EventModel();
-    
+
     event.id = item.id;
     event.name = item.name;
     event.startDate = item.startDate;
@@ -49,7 +49,7 @@ export class EventModel extends BaseModel implements IEvent {
     event.status = item.status;
     event.createdAt = item.createdAt;
     event.updatedAt = item.updatedAt;
-    
+
     return event;
   }
 }

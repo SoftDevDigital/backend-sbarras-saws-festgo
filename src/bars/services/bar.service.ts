@@ -1,14 +1,27 @@
-import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
-import { DynamoDBService } from '../../shared/services/dynamodb.service';
-import { BarModel } from '../../shared/models/bar.model';
+import {
+  Injectable,
+  NotFoundException,
+  ConflictException,
+  BadRequestException,
+} from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Bar, BarDocument } from '../../shared/schemas/bar.schema';
+import { Ticket, TicketDocument } from '../../shared/schemas/ticket.schema';
+import { Event, EventDocument } from '../../shared/schemas/event.schema';
 import { CreateBarDto, UpdateBarDto, BarQueryDto } from '../dto/bar.dto';
-import { IBar, IBarCreate } from '../../shared/interfaces/bar.interface';
-import { ITicket } from '../../shared/interfaces/ticket.interface';
-import { TABLE_NAMES } from '../../shared/config/dynamodb.config';
+import { IBar } from '../../shared/interfaces/bar.interface';
+import { PriceListService } from '../../price-lists/services/price-list.service';
 
 @Injectable()
 export class BarService {
-  constructor(private readonly dynamoDBService: DynamoDBService) {}
+  constructor(
+    @InjectModel(Bar.name) private readonly barModel: Model<BarDocument>,
+    @InjectModel(Ticket.name)
+    private readonly ticketModel: Model<TicketDocument>,
+    @InjectModel(Event.name) private readonly eventModel: Model<EventDocument>,
+    private readonly priceListService: PriceListService,
+  ) {}
 
   async create(createBarDto: CreateBarDto): Promise<IBar> {
     // Validar entrada
@@ -19,250 +32,129 @@ export class BarService {
     // Verificar que el evento existe
     await this.validateEventExists(createBarDto.eventId);
 
+    if (createBarDto.priceListId) {
+      await this.priceListService.findOne(createBarDto.priceListId);
+    }
+
     // Verificar si ya existe un bar con el mismo nombre en el mismo evento
-    const existingBar = await this.findByNameAndEvent(createBarDto.name, createBarDto.eventId);
+    const existingBar = await this.barModel.findOne({
+      name: createBarDto.name,
+      eventId: createBarDto.eventId,
+    });
+
     if (existingBar) {
-      throw new ConflictException(`Bar '${createBarDto.name}' already exists in event '${createBarDto.eventId}'. Please choose a different name.`);
-    }
-
-    // Crear nuevo bar
-    const barModel = new BarModel(createBarDto);
-    await this.dynamoDBService.put(TABLE_NAMES.BARS, barModel.toDynamoDBItem());
-
-    return {
-      id: barModel.id,
-      name: barModel.name,
-      eventId: barModel.eventId,
-      printer: barModel.printer,
-      status: barModel.status,
-      createdAt: barModel.createdAt,
-      updatedAt: barModel.updatedAt,
-    };
-  }
-
-  async findAll(query: BarQueryDto = {}): Promise<IBar[]> {
-    let items: any[] = [];
-
-    try {
-      if (query.eventId) {
-        // Intentar buscar por evento usando GSI1
-        try {
-          items = await this.dynamoDBService.query(
-            TABLE_NAMES.BARS,
-            'GSI1PK = :gsi1pk',
-            {
-              ':gsi1pk': `EVENT#${query.eventId}`,
-            },
-            undefined,
-            'GSI1'
-          );
-        } catch (error) {
-          // Fallback: usar scan si GSI1 no está disponible
-          console.warn('GSI1 not available, using scan fallback for event query');
-          items = await this.dynamoDBService.scan(
-            TABLE_NAMES.BARS,
-            'begins_with(PK, :pk)',
-            {
-              ':pk': 'BAR#',
-            }
-          );
-          // Filtrar por eventId en memoria
-          items = items.filter(item => item.eventId === query.eventId);
-        }
-      } else if (query.status) {
-        // Intentar buscar por status usando GSI2
-        try {
-          items = await this.dynamoDBService.query(
-            TABLE_NAMES.BARS,
-            'GSI2PK = :gsi2pk',
-            {
-              ':gsi2pk': `BAR#${query.status}`,
-            },
-            undefined,
-            'GSI2'
-          );
-        } catch (error) {
-          // Fallback: usar scan si GSI2 no está disponible
-          console.warn('GSI2 not available, using scan fallback for status query');
-          items = await this.dynamoDBService.scan(
-            TABLE_NAMES.BARS,
-            'begins_with(PK, :pk)',
-            {
-              ':pk': 'BAR#',
-            }
-          );
-          // Filtrar por status en memoria
-          items = items.filter(item => item.status === query.status);
-        }
-      } else {
-        // Buscar todos los bars
-        items = await this.dynamoDBService.scan(
-          TABLE_NAMES.BARS,
-          'begins_with(PK, :pk)',
-          {
-            ':pk': 'BAR#',
-          }
-        );
-      }
-    } catch (error) {
-      console.error('Error in findAll:', error.message);
-      // Retornar array vacío en caso de error
-      return [];
-    }
-
-    // Aplicar filtro de búsqueda si se proporciona
-    if (query.search) {
-      items = items.filter(item => 
-        item.name?.toLowerCase().includes(query.search!.toLowerCase())
+      throw new ConflictException(
+        `Bar '${createBarDto.name}' already exists in this event.`,
       );
     }
 
-    return items.map(item => BarModel.fromDynamoDBItem(item));
+    // Crear nuevo bar
+    const newBar = new this.barModel({
+      ...createBarDto,
+      status: 'active',
+    });
+
+    const savedBar = await newBar.save();
+
+    return this.mapBar(savedBar);
+  }
+
+  async findAll(query: BarQueryDto = {}): Promise<IBar[]> {
+    try {
+      const filter: any = {};
+
+      if (query.eventId) {
+        filter.eventId = query.eventId;
+      }
+
+      if (query.status) {
+        filter.status = query.status;
+      }
+
+      if (query.search) {
+        filter.name = { $regex: query.search, $options: 'i' };
+      }
+
+      const bars = await this.barModel.find(filter).sort({ createdAt: -1 });
+      return bars.map((bar) => this.mapBar(bar));
+    } catch (error) {
+      console.error('Error in findAll:', error.message);
+      return [];
+    }
   }
 
   async findOne(id: string): Promise<IBar> {
-    // Validar entrada
-    if (!id) {
-      throw new BadRequestException('Bar ID is required');
+    const bar = await this.barModel.findById(id);
+
+    if (!bar) {
+      throw new NotFoundException(`Bar with ID '${id}' not found.`);
     }
 
-    const item = await this.dynamoDBService.get(TABLE_NAMES.BARS, {
-      PK: `BAR#${id}`,
-      SK: `BAR#${id}`,
-    });
-
-    if (!item) {
-      throw new NotFoundException(`Bar with ID '${id}' not found. Please verify the bar ID and try again.`);
+    const mapped = this.mapBar(bar);
+    if (mapped.priceListId) {
+      try {
+        const pl = await this.priceListService.findOne(mapped.priceListId);
+        mapped.priceListName = pl.name;
+      } catch {
+        /* lista borrada o inconsistente: dejamos solo el id */
+      }
     }
-
-    return BarModel.fromDynamoDBItem(item);
+    return mapped;
   }
 
   async update(id: string, updateBarDto: UpdateBarDto): Promise<IBar> {
-    // Verificar que el bar existe
     const existingBar = await this.findOne(id);
 
-    // Si se está actualizando el nombre, verificar que no exista otro bar con el mismo nombre en el mismo evento
+    // Si se está actualizando el nombre, verificar duplicados
     if (updateBarDto.name && updateBarDto.name !== existingBar.name) {
-      const duplicateBar = await this.findByNameAndEvent(updateBarDto.name, existingBar.eventId);
-      if (duplicateBar && duplicateBar.id !== id) {
-        throw new ConflictException(`Cannot update bar '${existingBar.name}' to '${updateBarDto.name}'. A bar with this name already exists in event '${existingBar.eventId}'. Please choose a different name.`);
+      const duplicateBar = await this.barModel.findOne({
+        name: updateBarDto.name,
+        eventId: existingBar.eventId,
+      });
+
+      if (duplicateBar && duplicateBar._id !== id) {
+        throw new ConflictException(
+          `A bar with name '${updateBarDto.name}' already exists in this event.`,
+        );
       }
     }
 
-    // Actualizar el bar
-    const updatedBar = {
-      ...existingBar,
-      ...updateBarDto,
-      updatedAt: new Date().toISOString(),
-    };
+    if (updateBarDto.priceListId) {
+      await this.priceListService.findOne(updateBarDto.priceListId);
+    }
 
-    const barModel = new BarModel();
-    Object.assign(barModel, updatedBar);
+    const updatedBar = await this.barModel.findByIdAndUpdate(
+      id,
+      { ...updateBarDto },
+      { new: true },
+    );
 
-    await this.dynamoDBService.put(TABLE_NAMES.BARS, barModel.toDynamoDBItem());
+    if (!updatedBar) {
+      throw new NotFoundException(`Bar with ID '${id}' not found.`);
+    }
 
-    return updatedBar;
+    return this.mapBar(updatedBar);
   }
 
   async remove(id: string): Promise<{ message: string; deletedBar: IBar }> {
-    // Verificar que el bar existe
-    const existingBar = await this.findOne(id);
+    const bar = await this.findOne(id);
 
-    // Eliminar el bar
-    await this.dynamoDBService.delete(TABLE_NAMES.BARS, {
-      PK: `BAR#${id}`,
-      SK: `BAR#${id}`,
-    });
+    await this.barModel.findByIdAndDelete(id);
 
     return {
-      message: `Bar '${existingBar.name}' has been successfully deleted`,
-      deletedBar: existingBar
+      message: `Bar '${bar.name}' has been successfully deleted`,
+      deletedBar: bar,
     };
   }
 
   async findByEvent(eventId: string): Promise<IBar[]> {
-    // Validar entrada
-    if (!eventId) {
-      throw new BadRequestException('Event ID is required');
-    }
-
-    console.log(`🔍 Searching bars for event: ${eventId}`);
-    
-    try {
-      console.log('📊 Attempting GSI1 query...');
-      const items = await this.dynamoDBService.query(
-        TABLE_NAMES.BARS,
-        'GSI1PK = :gsi1pk',
-        {
-          ':gsi1pk': `EVENT#${eventId}`,
-        },
-        undefined,
-        'GSI1'
-      );
-      console.log(`✅ GSI1 query successful, found ${items.length} items`);
-      return items.map(item => BarModel.fromDynamoDBItem(item));
-    } catch (error) {
-      console.warn(`⚠️ GSI1 query failed: ${error.message}`);
-      console.log('🔄 Using scan fallback for findByEvent...');
-      
-      try {
-        const items = await this.dynamoDBService.scan(
-          TABLE_NAMES.BARS,
-          'begins_with(PK, :pk)',
-          {
-            ':pk': 'BAR#',
-          }
-        );
-        console.log(`📊 Scan found ${items.length} total bars`);
-        
-        // Filtrar por eventId en memoria
-        const filteredItems = items.filter(item => item.eventId === eventId);
-        console.log(`🎯 Filtered to ${filteredItems.length} bars for event ${eventId}`);
-        
-        return filteredItems.map(item => BarModel.fromDynamoDBItem(item));
-      } catch (scanError) {
-        console.error(`❌ Scan fallback also failed: ${scanError.message}`);
-        return [];
-      }
-    }
+    const bars = await this.barModel.find({ eventId }).sort({ name: 1 });
+    return bars.map((bar) => this.mapBar(bar));
   }
 
   async findByStatus(status: 'active' | 'closed'): Promise<IBar[]> {
-    // Validar entrada
-    if (!status) {
-      throw new BadRequestException('Status is required');
-    }
-
-    if (status !== 'active' && status !== 'closed') {
-      throw new BadRequestException('Status must be either "active" or "closed"');
-    }
-
-    try {
-      const items = await this.dynamoDBService.query(
-        TABLE_NAMES.BARS,
-        'GSI2PK = :gsi2pk',
-        {
-          ':gsi2pk': `BAR#${status}`,
-        },
-        undefined,
-        'GSI2'
-      );
-      return items.map(item => BarModel.fromDynamoDBItem(item));
-    } catch (error) {
-      // Fallback: usar scan si GSI2 no está disponible
-      console.warn('GSI2 not available, using scan fallback for findByStatus');
-      const items = await this.dynamoDBService.scan(
-        TABLE_NAMES.BARS,
-        'begins_with(PK, :pk)',
-        {
-          ':pk': 'BAR#',
-        }
-      );
-      // Filtrar por status en memoria
-      const filteredItems = items.filter(item => item.status === status);
-      return filteredItems.map(item => BarModel.fromDynamoDBItem(item));
-    }
+    const bars = await this.barModel.find({ status }).sort({ createdAt: -1 });
+    return bars.map((bar) => this.mapBar(bar));
   }
 
   async changeStatus(id: string, status: 'active' | 'closed'): Promise<IBar> {
@@ -270,264 +162,234 @@ export class BarService {
   }
 
   private async validateEventExists(eventId: string): Promise<void> {
-    try {
-      const event = await this.dynamoDBService.get(TABLE_NAMES.EVENTS, {
-        PK: `EVENT#${eventId}`,
-        SK: `EVENT#${eventId}`,
-      });
-
-      if (!event) {
-        throw new BadRequestException(`Event with ID '${eventId}' does not exist. Please create the event first or use a valid event ID.`);
-      }
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        throw error;
-      }
-      throw new BadRequestException(`Event with ID '${eventId}' does not exist. Please create the event first or use a valid event ID.`);
-    }
-  }
-
-  private async findByNameAndEvent(name: string, eventId: string): Promise<IBar | null> {
-    try {
-      const items = await this.dynamoDBService.query(
-        TABLE_NAMES.BARS,
-        'GSI1PK = :gsi1pk',
-        {
-          ':gsi1pk': `EVENT#${eventId}`,
-          ':name': name,
-        },
-        undefined,
-        'GSI1'
+    const event = await this.eventModel.findById(eventId);
+    if (!event) {
+      throw new BadRequestException(
+        `Event with ID '${eventId}' does not exist.`,
       );
-
-      // Filtrar por nombre ya que DynamoDB no soporta FilterExpression en query con GSI
-      const filteredItems = items.filter(item => item.name === name);
-
-      return filteredItems.length > 0 ? BarModel.fromDynamoDBItem(filteredItems[0]) : null;
-    } catch (error) {
-      return null;
     }
   }
 
-  async getBarSalesSummary(barId: string): Promise<{
-    bar: IBar;
-    totalSales: number;
-    totalTickets: number;
-    totalRevenue: number;
-    averageTicketValue: number;
-    productsSold: Array<{
-      productId: string;
-      productName: string;
-      quantitySold: number;
-      revenue: number;
-      percentage: number;
-    }>;
-    productsSoldByPaymentMethod: {
-      cash: Array<{
-        productId: string;
-        productName: string;
-        quantitySold: number;
-        revenue: number;
-        percentage: number;
-      }>;
-      card: Array<{
-        productId: string;
-        productName: string;
-        quantitySold: number;
-        revenue: number;
-        percentage: number;
-      }>;
-      transfer: Array<{
-        productId: string;
-        productName: string;
-        quantitySold: number;
-        revenue: number;
-        percentage: number;
-      }>;
-      administrator: Array<{
-        productId: string;
-        productName: string;
-        quantitySold: number;
-        revenue: number;
-        percentage: number;
-      }>;
-      dj: Array<{
-        productId: string;
-        productName: string;
-        quantitySold: number;
-        revenue: number;
-        percentage: number;
-      }>;
-    };
-    salesByUser: Array<{
-      userId: string;
-      userName: string;
-      ticketCount: number;
-      totalSales: number;
-    }>;
-    salesByPaymentMethod: {
-      cash: number;
-      card: number;
-      transfer: number;
-      administrator: number;
-      dj: number;
-    };
-    hourlyDistribution: Array<{
-      hour: string;
-      ticketCount: number;
-      revenue: number;
-    }>;
-  }> {
+  async getBarSalesSummary(barId: string): Promise<any> {
     try {
-      // Obtener información de la barra
       const bar = await this.findOne(barId);
 
-      // Obtener TODOS los tickets de esta barra (paginación completa para que el admin vea todo lo vendido)
-      let ticketItems = [];
-      try {
-        ticketItems = await this.dynamoDBService.query(
-          TABLE_NAMES.TICKETS,
-          'GSI2PK = :gsi2pk',
-          { ':gsi2pk': `BAR#${barId}` },
-          undefined,
-          'GSI2',
-          100
-        );
-      } catch (error) {
-        // Fallback: scan con paginación para traer TODOS los tickets y filtrar por barId
-        console.warn('GSI2 not available for tickets, using scan fallback');
-        const allTickets = await this.dynamoDBService.scan(TABLE_NAMES.TICKETS, undefined, undefined, undefined, undefined, 100);
-        ticketItems = allTickets.filter(t => t.barId === barId);
-      }
-
-      // Cargar items de cada ticket (con paginación para no perder ningún ítem)
-      const ticketsWithItems: ITicket[] = [];
-      for (const ticketItem of ticketItems) {
-        const items = await this.dynamoDBService.query(
-          TABLE_NAMES.TICKET_ITEMS,
-          'PK = :pk AND begins_with(SK, :sk)',
-          {
-            ':pk': `TICKET#${ticketItem.id}`,
-            ':sk': 'ITEM#'
-          },
-          undefined,
-          undefined,
-          100
-        );
-        
-        ticketsWithItems.push({
-          ...ticketItem,
-          items: items || []
-        } as ITicket);
-      }
+      // Obtener todos los tickets de esta barra
+      const tickets = await this.ticketModel.find({ barId });
 
       // Calcular totales
-      const totalTickets = ticketsWithItems.length;
-      const totalRevenue = ticketsWithItems.reduce((sum, t) => sum + (t.total || 0), 0);
-      const totalSales = ticketsWithItems.filter(t => t.status === 'paid').length;
-      const averageTicketValue = totalTickets > 0 ? totalRevenue / totalTickets : 0;
+      const totalTickets = tickets.length;
+      const totalRevenue = tickets.reduce((sum, t) => sum + (t.total || 0), 0);
+      const totalSales = tickets.filter((t) => t.status === 'paid').length;
+      const averageTicketValue =
+        totalTickets > 0 ? totalRevenue / totalTickets : 0;
 
       // Productos más vendidos
-      const productsMap = new Map<string, { name: string; quantity: number; revenue: number }>();
-      
-      for (const ticket of ticketsWithItems) {
+      const productsMap = new Map<
+        string,
+        { name: string; quantity: number; revenue: number }
+      >();
+
+      for (const ticket of tickets) {
         for (const item of ticket.items) {
-          const existing = productsMap.get(item.productId) || { name: item.productName, quantity: 0, revenue: 0 };
+          const existing = productsMap.get(item.productId) || {
+            name: item.productName,
+            quantity: 0,
+            revenue: 0,
+          };
           existing.quantity += item.quantity;
           existing.revenue += item.total;
           productsMap.set(item.productId, existing);
         }
       }
 
-      const productsSold = Array.from(productsMap.entries()).map(([productId, data]) => ({
-        productId,
-        productName: data.name,
-        quantitySold: data.quantity,
-        revenue: data.revenue,
-        percentage: totalRevenue > 0 ? (data.revenue / totalRevenue) * 100 : 0
-      })).sort((a, b) => b.revenue - a.revenue);
-
-      // Productos vendidos por método de pago
-      const calculateProductsByPaymentMethod = (paymentMethod: 'cash' | 'card' | 'transfer' | 'administrator' | 'dj') => {
-        const filteredTickets = ticketsWithItems.filter(t => t.paymentMethod === paymentMethod);
-        const methodRevenue = filteredTickets.reduce((sum, t) => sum + (t.total || 0), 0);
-        const productsMapByMethod = new Map<string, { name: string; quantity: number; revenue: number }>();
-        
-        for (const ticket of filteredTickets) {
-          for (const item of ticket.items) {
-            const existing = productsMapByMethod.get(item.productId) || { 
-              name: item.productName, 
-              quantity: 0, 
-              revenue: 0 
-            };
-            existing.quantity += item.quantity;
-            existing.revenue += item.total;
-            productsMapByMethod.set(item.productId, existing);
-          }
-        }
-
-        return Array.from(productsMapByMethod.entries()).map(([productId, data]) => ({
+      const productsSold = Array.from(productsMap.entries())
+        .map(([productId, data]) => ({
           productId,
           productName: data.name,
           quantitySold: data.quantity,
           revenue: data.revenue,
-          percentage: methodRevenue > 0 ? (data.revenue / methodRevenue) * 100 : 0
-        })).sort((a, b) => b.revenue - a.revenue);
+          percentage:
+            totalRevenue > 0 ? (data.revenue / totalRevenue) * 100 : 0,
+        }))
+        .sort((a, b) => b.revenue - a.revenue);
+
+      // Productos vendidos por método de pago
+      const calculateByPayment = (method: string) => {
+        const filtered = tickets.filter((t) => t.paymentMethod === method);
+        const methodRevenue = filtered.reduce(
+          (sum, t) => sum + (t.total || 0),
+          0,
+        );
+        const map = new Map<
+          string,
+          { name: string; quantity: number; revenue: number }
+        >();
+
+        for (const t of filtered) {
+          for (const i of t.items) {
+            const ex = map.get(i.productId) || {
+              name: i.productName,
+              quantity: 0,
+              revenue: 0,
+            };
+            ex.quantity += i.quantity;
+            ex.revenue += i.total;
+            map.set(i.productId, ex);
+          }
+        }
+
+        return Array.from(map.entries())
+          .map(([id, data]) => ({
+            productId: id,
+            productName: data.name,
+            quantitySold: data.quantity,
+            revenue: data.revenue,
+            percentage:
+              methodRevenue > 0 ? (data.revenue / methodRevenue) * 100 : 0,
+          }))
+          .sort((a, b) => b.revenue - a.revenue);
       };
 
       const productsSoldByPaymentMethod = {
-        cash: calculateProductsByPaymentMethod('cash'),
-        card: calculateProductsByPaymentMethod('card'),
-        transfer: calculateProductsByPaymentMethod('transfer'),
-        administrator: calculateProductsByPaymentMethod('administrator'),
-        dj: calculateProductsByPaymentMethod('dj')
+        cash: calculateByPayment('cash'),
+        card: calculateByPayment('card'),
+        transfer: calculateByPayment('transfer'),
+        administrator: calculateByPayment('administrator'),
+        dj: calculateByPayment('dj'),
       };
 
-      // Ventas por usuario (bartender)
-      const usersMap = new Map<string, { name: string; count: number; total: number }>();
-      
-      for (const ticket of ticketsWithItems) {
-        const existing = usersMap.get(ticket.userId) || { name: ticket.userName, count: 0, total: 0 };
-        existing.count += 1;
-        existing.total += ticket.total || 0;
-        usersMap.set(ticket.userId, existing);
+      // Ventas por usuario
+      const usersMap = new Map<
+        string,
+        { name: string; count: number; total: number }
+      >();
+      for (const t of tickets) {
+        const ex = usersMap.get(t.userId) || {
+          name: t.userName,
+          count: 0,
+          total: 0,
+        };
+        ex.count += 1;
+        ex.total += t.total || 0;
+        usersMap.set(t.userId, ex);
       }
 
-      const salesByUser = Array.from(usersMap.entries()).map(([userId, data]) => ({
-        userId,
-        userName: data.name,
-        ticketCount: data.count,
-        totalSales: data.total
-      })).sort((a, b) => b.totalSales - a.totalSales);
+      const salesByUser = Array.from(usersMap.entries())
+        .map(([userId, data]) => ({
+          userId,
+          userName: data.name,
+          ticketCount: data.count,
+          totalSales: data.total,
+        }))
+        .sort((a, b) => b.totalSales - a.totalSales);
 
       // Ventas por método de pago
       const salesByPaymentMethod = {
-        cash: ticketsWithItems.filter(t => t.paymentMethod === 'cash').reduce((sum, t) => sum + t.total, 0),
-        card: ticketsWithItems.filter(t => t.paymentMethod === 'card').reduce((sum, t) => sum + t.total, 0),
-        transfer: ticketsWithItems.filter(t => t.paymentMethod === 'transfer').reduce((sum, t) => sum + t.total, 0),
-        administrator: ticketsWithItems.filter(t => t.paymentMethod === 'administrator').reduce((sum, t) => sum + t.total, 0),
-        dj: ticketsWithItems.filter(t => t.paymentMethod === 'dj').reduce((sum, t) => sum + t.total, 0)
+        cash: tickets
+          .filter((t) => t.paymentMethod === 'cash')
+          .reduce((sum, t) => sum + t.total, 0),
+        card: tickets
+          .filter((t) => t.paymentMethod === 'card')
+          .reduce((sum, t) => sum + t.total, 0),
+        transfer: tickets
+          .filter((t) => t.paymentMethod === 'transfer')
+          .reduce((sum, t) => sum + t.total, 0),
+        administrator: tickets
+          .filter((t) => t.paymentMethod === 'administrator')
+          .reduce((sum, t) => sum + t.total, 0),
+        dj: tickets
+          .filter((t) => t.paymentMethod === 'dj')
+          .reduce((sum, t) => sum + t.total, 0),
       };
 
       // Distribución por hora
       const hoursMap = new Map<string, { count: number; revenue: number }>();
-      
-      for (const ticket of ticketsWithItems) {
-        const hour = new Date(ticket.createdAt).getHours().toString().padStart(2, '0') + ':00';
-        const existing = hoursMap.get(hour) || { count: 0, revenue: 0 };
-        existing.count += 1;
-        existing.revenue += ticket.total || 0;
-        hoursMap.set(hour, existing);
+      for (const t of tickets) {
+        const hour =
+          new Date(t['createdAt']).getHours().toString().padStart(2, '0') +
+          ':00';
+        const ex = hoursMap.get(hour) || { count: 0, revenue: 0 };
+        ex.count += 1;
+        ex.revenue += t.total || 0;
+        hoursMap.set(hour, ex);
       }
 
-      const hourlyDistribution = Array.from(hoursMap.entries()).map(([hour, data]) => ({
-        hour,
-        ticketCount: data.count,
-        revenue: data.revenue
-      })).sort((a, b) => a.hour.localeCompare(b.hour));
+      const hourlyDistribution = Array.from(hoursMap.entries())
+        .map(([hour, data]) => ({
+          hour,
+          ticketCount: data.count,
+          revenue: data.revenue,
+        }))
+        .sort((a, b) => a.hour.localeCompare(b.hour));
+
+      let priceListId: string | undefined;
+      let priceListName: string | undefined;
+      if (bar.priceListId) {
+        priceListId = bar.priceListId;
+        try {
+          const pl = await this.priceListService.findOne(bar.priceListId);
+          priceListName = pl.name;
+        } catch {
+          /* ignore */
+        }
+      }
+
+      const eventDoc = await this.eventModel.findById(bar.eventId);
+      const eventSummary = eventDoc
+        ? { id: eventDoc._id, name: eventDoc.name, status: eventDoc.status }
+        : { id: bar.eventId, name: '(evento no encontrado)', status: null as string | null };
+
+      // Ventas agrupadas por snapshot de lista de precios en cada ticket (si cambió la lista de la barra en el tiempo).
+      const listKey = (t: TicketDocument) =>
+        `${t.priceListId || '_sin_lista'}|${t.priceListName || ''}`;
+      const byListSnap = new Map<
+        string,
+        {
+          priceListId: string | null;
+          priceListName: string | null;
+          ticketCount: number;
+          revenue: number;
+        }
+      >();
+      for (const t of tickets) {
+        const k = listKey(t);
+        const ex = byListSnap.get(k) || {
+          priceListId: t.priceListId || null,
+          priceListName: t.priceListName || null,
+          ticketCount: 0,
+          revenue: 0,
+        };
+        ex.ticketCount += 1;
+        ex.revenue += t.total || 0;
+        byListSnap.set(k, ex);
+      }
+      const salesByPriceListSnapshot = Array.from(byListSnap.values()).sort(
+        (a, b) => b.revenue - a.revenue,
+      );
 
       return {
         bar,
+        event: eventSummary,
+        /** Lista de precios actualmente asignada a la barra (configuración vigente). */
+        assignedPriceList: {
+          priceListId: bar.priceListId ?? null,
+          priceListName: priceListName ?? null,
+        },
+        /** @deprecated usar assignedPriceList */
+        priceListId,
+        /** @deprecated usar assignedPriceList */
+        priceListName,
+        /** Desglose por lista de precios guardada en cada ticket (histórico). */
+        salesByPriceListSnapshot,
+        reportLegend: {
+          assignedPriceList:
+            'Lista de precios vinculada a la barra hoy (PATCH /bars/:id).',
+          salesByPriceListSnapshot:
+            'Cada ticket guarda el nombre/id de lista al momento de la venta; si cambiaste la lista de la barra, verás más de un grupo aquí.',
+          productsSold:
+            'Importes y cantidades según lo cobrado en cada ticket (precios de la lista vigente al vender).',
+        },
         totalSales,
         totalTickets,
         totalRevenue,
@@ -536,12 +398,24 @@ export class BarService {
         productsSoldByPaymentMethod,
         salesByUser,
         salesByPaymentMethod,
-        hourlyDistribution
+        hourlyDistribution,
       };
-
     } catch (error) {
       console.error('Error getting bar sales summary:', error);
-      throw new BadRequestException('Failed to retrieve bar sales summary. Please try again.');
+      throw new BadRequestException('Failed to retrieve bar sales summary.');
     }
+  }
+
+  private mapBar(bar: BarDocument): IBar {
+    return {
+      id: bar._id,
+      name: bar.name,
+      eventId: bar.eventId,
+      printer: bar.printer,
+      priceListId: bar.priceListId,
+      status: bar.status,
+      createdAt: bar['createdAt'],
+      updatedAt: bar['updatedAt'],
+    };
   }
 }

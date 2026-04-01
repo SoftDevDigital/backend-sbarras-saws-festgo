@@ -32,6 +32,9 @@ export interface ITicket {
   barName: string;
   eventId: string;
   eventName: string;
+  /** Lista de precios aplicada en el momento de la venta */
+  priceListId?: string;
+  priceListName?: string;
   status: 'open' | 'paid' | 'cancelled' | 'refunded';
   paymentMethod?: 'cash' | 'card' | 'transfer' | 'administrator' | 'dj';
   subtotal: number;
@@ -85,6 +88,13 @@ export interface ITicketStats {
     productId: string;
     productName: string;
     quantity: number;
+    revenue: number;
+  }>;
+  /** Ventas agrupadas por lista de precios snapshot en el ticket */
+  salesByPriceList?: Array<{
+    priceListId: string | null;
+    priceListName: string | null;
+    ticketCount: number;
     revenue: number;
   }>;
 }
