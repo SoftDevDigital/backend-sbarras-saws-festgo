@@ -1,5 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, BadRequestException } from '@nestjs/common';
+import type { CorsOptions } from '@nestjs/common/interfaces/external/cors-options.interface';
+import type { ValidationError } from 'class-validator';
 import { AppModule } from './app.module';
 import { appConfig, validateConfig } from './shared/config/app.config';
 import { HttpExceptionFilter } from './shared/filters/http-exception.filter';
@@ -54,39 +56,82 @@ async function bootstrap() {
   validateConfig();
 
   const app = await NestFactory.create(AppModule);
+  const stringifyUnknown = (value: unknown): string => {
+    if (value instanceof Error) return value.message;
+    if (typeof value === 'string') return value;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return '[unstringifiable error]';
+    }
+  };
 
   // MongoDB se inicializa automáticamente al importar MongooseModule en AppModule
 
   // Habilitar CORS
-  app.enableCors({
-    origin: (origin, callback) => {
+  const corsOptions: CorsOptions = {
+    origin: (
+      origin: string | undefined,
+      callback: (err: Error | null, allow?: boolean) => void,
+    ) => {
       // Permitir requests sin origin (ej: mobile apps, Postman, etc.)
       if (!origin) return callback(null, true);
 
-      // Permitir localhost:3000 y el origen configurado en variables de entorno
+      const normalizeOrigin = (value: string): string => {
+        // Origin debería ser un "origin" válido (scheme + host + optional port).
+        // Si viene con variaciones, intentamos normalizarlo.
+        try {
+          return new URL(value).origin;
+        } catch {
+          return value.trim().replace(/\/+$/, '');
+        }
+      };
+
+      const originNormalized = normalizeOrigin(origin);
+
+      // Permitir localhost y dominios permitidos (incluye festgo-barras.com)
       const allowedOrigins = [
         'http://localhost:3003',
         'http://127.0.0.1:3003',
         'https://festgo-barras.com',
         'https://www.festgo-barras.com',
         'http://festgo-barras.com',
-        appConfig.corsOrigin,
-      ].filter((origin) => origin && origin !== '*');
+        // Permitir configurar uno o varios orígenes por env var:
+        // CORS_ORIGIN="https://festgo-barras.com,https://www.festgo-barras.com"
+        ...(appConfig.corsOrigin || '')
+          .split(',')
+          .map((v) => v.trim())
+          .filter(Boolean),
+      ]
+        .filter((v) => v && v !== '*')
+        .map(normalizeOrigin);
 
-      if (allowedOrigins.includes(origin)) {
+      if (allowedOrigins.includes(originNormalized)) {
         return callback(null, true);
       }
 
       // En desarrollo, permitir cualquier origen localhost
-      if (appConfig.nodeEnv === 'development' && origin.includes('localhost')) {
+      if (
+        appConfig.nodeEnv === 'development' &&
+        originNormalized.includes('localhost')
+      ) {
         return callback(null, true);
       }
 
       return callback(new Error('Not allowed by CORS'), false);
     },
-    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Requested-With',
+      'Accept',
+      'Origin',
+    ],
     credentials: true,
-  });
+  };
+
+  app.enableCors(corsOptions);
 
   // Configurar validación global con mensajes específicos
   app.useGlobalPipes(
@@ -97,11 +142,11 @@ async function bootstrap() {
       transformOptions: {
         enableImplicitConversion: true,
       },
-      exceptionFactory: (errors) => {
+      exceptionFactory: (errors: ValidationError[]) => {
         const result = errors.map((error) => ({
           property: error.property,
-          value: error.value,
-          constraints: error.constraints,
+          value: error.value as unknown,
+          constraints: error.constraints as Record<string, string> | undefined,
         }));
         return new BadRequestException({
           message: 'Validation failed',
@@ -146,8 +191,8 @@ async function bootstrap() {
         `Original port ${appConfig.port} was occupied, using port ${availablePort}`,
       );
     }
-  } catch (error) {
-    console.error('Error starting application:', error.message);
+  } catch (error: unknown) {
+    console.error('Error starting application:', stringifyUnknown(error));
     process.exit(1);
   }
 
